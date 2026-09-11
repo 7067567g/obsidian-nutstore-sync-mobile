@@ -1,5 +1,60 @@
-> **个人修订版本 / Personal Revision** — 本仓库是 `nutstore/obsidian-nutstore-sync` 的个人修改版，基于上游 `79d35b4`，修改记录见 `PERSONAL_REVISION.md`。许可证仍为 AGPL-3.0。
-> This repository is a personal modified version of `nutstore/obsidian-nutstore-sync`, based on upstream `79d35b4`. See `PERSONAL_REVISION.md`. Licensed under AGPL-3.0.
+<h1 align="center">Nutstore Sync — 个人修订版 / Personal Revision</h1>
+
+<p align="center">
+  <strong>非官方个人修改版，不是原作者的官方仓库。</strong><br>
+  <em>Unofficial personal modified version. Not the original project.</em>
+</p>
+
+<p align="center">
+  原项目 / Original project：
+  <a href="https://github.com/nutstore/obsidian-nutstore-sync"><code>nutstore/obsidian-nutstore-sync</code></a>
+</p>
+
+> [!IMPORTANT]
+> **本仓库是个人修订版（personal revision），与原作者、坚果云官方均无隶属或背书关系。**
+> 如果你要安装或使用官方版本，请前往 Obsidian 社区插件或原仓库：
+> <https://github.com/nutstore/obsidian-nutstore-sync>
+>
+> **This repository is an unofficial personal modified version and is not affiliated with, maintained by, or endorsed by the original authors or Nutstore.**
+> For the official plugin, please use the original repository:
+> <https://github.com/nutstore/obsidian-nutstore-sync>
+
+| 项目 | 信息 |
+| --- | --- |
+| 原仓库 / Upstream | [nutstore/obsidian-nutstore-sync](https://github.com/nutstore/obsidian-nutstore-sync) |
+| 本仓库 / This fork | [7067567g/obsidian-nutstore-sync-personal](https://github.com/7067567g/obsidian-nutstore-sync-personal) |
+| 基线 / Based on | `79d35b4` |
+| 个人修订标签 / Personal tag | `personal-20260911` |
+| 许可证 / License | [AGPL-3.0](LICENSE)，与上游相同 / same as upstream |
+
+### 个人修改摘要 / Personal changes
+
+这是原项目的个人修改分支，主要差异如下：
+
+- 会话存储冷读与恢复相关修复；
+- 新增原生 vault 工具与设置白名单工具；
+- 新增 `view_pdf`：优先读取 PDF 文本，无文字层时渲染成图片交给模型；
+- 新增本地构建、安装、release 脚本；
+- 其他修改记录见 [`PERSONAL_REVISION.md`](PERSONAL_REVISION.md)。
+
+<details>
+<summary>English summary</summary>
+
+- Session storage cold-read and recovery fixes;
+- Native vault tools and whitelisted settings tools;
+- `view_pdf`: text-first PDF reading with image fallback for scanned pages;
+- Local build, install, and release scripts;
+- See [`PERSONAL_REVISION.md`](PERSONAL_REVISION.md) for the full modification record.
+
+</details>
+
+---
+
+# 上游原始 README / Upstream README
+
+> 以下内容来自原项目 README，保留其原始标题、徽章和说明，仅用于功能参考。版权与商标归原作者所有。
+>
+> The content below is the original upstream README, preserved for feature reference. Copyright and trademarks remain with the original authors.
 
 <h1 align="center">Nutstore Sync</h1>
 
