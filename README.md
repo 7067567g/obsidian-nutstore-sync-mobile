@@ -1,3 +1,6 @@
+> **个人修订版本 / Personal Revision** — 本仓库是 `nutstore/obsidian-nutstore-sync` 的个人修改版，基于上游 `79d35b4`，修改记录见 `PERSONAL_REVISION.md`。许可证仍为 AGPL-3.0。
+> This repository is a personal modified version of `nutstore/obsidian-nutstore-sync`, based on upstream `79d35b4`. See `PERSONAL_REVISION.md`. Licensed under AGPL-3.0.
+
 <h1 align="center">Nutstore Sync</h1>
 
 <p align="center">

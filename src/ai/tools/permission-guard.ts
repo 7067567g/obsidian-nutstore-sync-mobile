@@ -17,6 +17,16 @@ export interface FSSinglePathPermissionRequest {
 	sessionTitle?: string
 }
 
+export interface FSBatchPermissionRequest {
+	type: 'fs'
+	fs: {
+		kind: AISinglePathFileOperation
+		paths: string[]
+	}
+	purpose?: string
+	sessionTitle?: string
+}
+
 export interface FSDualPathPermissionRequest {
 	type: 'fs'
 	fs: {
@@ -41,6 +51,7 @@ export interface SettingsPermissionRequest {
 
 export type PermissionRequest =
 	| FSSinglePathPermissionRequest
+	| FSBatchPermissionRequest
 	| FSDualPathPermissionRequest
 	| SettingsPermissionRequest
 export type PermissionGuard = (request: PermissionRequest) => Promise<void>
@@ -72,6 +83,12 @@ function isDualPathRequest(
 	)
 }
 
+function isBatchPathRequest(
+	request: PermissionRequest,
+): request is FSBatchPermissionRequest {
+	return request.type === 'fs' && 'paths' in request.fs
+}
+
 export function getPermissionRequestOperationSignature(
 	request: PermissionRequest,
 ) {
@@ -88,6 +105,9 @@ function formatDeniedSummary(request: PermissionRequest) {
 	const { kind } = request.fs
 	if (isDualPathRequest(request)) {
 		return `${kind} from ${request.fs.src} to ${request.fs.dest}`
+	}
+	if (isBatchPathRequest(request)) {
+		return `${kind} on ${request.fs.paths.length} file(s)`
 	}
 	return `${kind} on ${request.fs.path}`
 }

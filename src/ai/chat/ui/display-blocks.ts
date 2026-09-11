@@ -14,7 +14,7 @@ function todosFromMessage(message: AppUIMessage): ChatTodoItem[] | undefined {
 	return undefined
 }
 
-function buildMessageDisplayBlocks(
+export function buildMessageDisplayBlocks(
 	message: AppUIMessage,
 	toolTimings: import('~/ai/chat/types').ChatAgentState['toolTimings'],
 	operations: import('~/ai/chat/types').ReversibleToolOp[] = [],
@@ -71,6 +71,10 @@ function buildMessageDisplayBlocks(
 	return blocks
 }
 
+export function messageHasUserContext(message: AppUIMessage) {
+	return message.parts.some((part) => part.type === 'data-user-context')
+}
+
 export function projectTimelineMessageGroups(
 	messages: AppUIMessage[],
 	toolTimings: import('~/ai/chat/types').ChatAgentState['toolTimings'] = {},
@@ -83,9 +87,7 @@ export function projectTimelineMessageGroups(
 			toolTimings,
 			operations[message.id],
 		)
-		const hasContext = message.parts.some(
-			(part) => part.type === 'data-user-context',
-		)
+		const hasContext = messageHasUserContext(message)
 		return blocks.length || hasContext ? [{ message, blocks }] : []
 	})
 }

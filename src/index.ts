@@ -10,6 +10,10 @@ import { Menu, normalizePath, Plugin } from 'obsidian'
 import { createSelectedTextContextItem } from './ai/chat/context/user-context'
 import { registerChatboxAiIcon } from './assets/icons/obsidian-nutstore-ai-icon'
 import { SyncRibbonManager } from './components/SyncRibbonManager'
+import { DiagnosticsLogFile } from './diagnostics/log-file'
+import { exportDiagnosticsPackage } from './diagnostics/report'
+import { runSelfCheck } from './diagnostics/self-check'
+import type { DiagnosticsSelfCheckReport } from './diagnostics/self-check'
 import { emitCancelSync } from './events'
 import i18n from './i18n'
 import AIConflictResolverService from './services/ai-conflict-resolver.service'
@@ -37,6 +41,7 @@ import {
 	NutstoreSettingTab,
 } from './settings'
 import { decryptOAuthResponse } from './utils/decrypt-ticket-response'
+import logger from './utils/logger'
 import { stdRemotePath } from './utils/std-remote-path'
 import ChatboxView, { CHATBOX_VIEW_TYPE } from './views/chatbox.view'
 
@@ -46,6 +51,8 @@ export default class NutstorePlugin extends Plugin {
 	public isSyncing: boolean = false
 	public localSettings!: NutstoreLocalSettings
 	public settingTab!: NutstoreSettingTab
+	public diagnosticsLogFile = new DiagnosticsLogFile(this.app)
+	public selfCheckReport: DiagnosticsSelfCheckReport | null = null
 
 	public commandService = new CommandService(this)
 	public eventsService = new EventsService(this)
@@ -149,15 +156,51 @@ export default class NutstorePlugin extends Plugin {
 		)
 
 		await this.chatService.handleSettingsChanged()
+		void this.chatService.recoverPendingWrites()
+		this.registerDomEvent(document, 'visibilitychange', () => {
+			if (document.hidden) void this.chatService.flushPendingSessions()
+		})
+		this.registerDomEvent(window, 'pagehide', () => {
+			void this.chatService.flushPendingSessions()
+		})
+		const opsGcTimer = window.setTimeout(() => {
+			void this.chatService.runOpsGcReport()
+		}, 5000)
+		this.register(() => window.clearTimeout(opsGcTimer))
+		void this.runDiagnosticsSelfCheck()
 	}
 
-	onunload() {
-		this.settingTab?.unload()
-
-		emitCancelSync()
-		for (const service of [...this.services].reverse()) {
-			void service.onunload()
+	private async runDiagnosticsSelfCheck() {
+		try {
+			const report = await runSelfCheck(this)
+			this.selfCheckReport = report
+			logger.info('Diagnostics self-check', report)
+			await this.diagnosticsLogFile.flush()
+			await exportDiagnosticsPackage(this, { reason: 'startup' })
+		} catch (error) {
+			logger.error('Diagnostics self-check failed', error)
 		}
+	}
+
+	async onunload(): Promise<void> {
+		this.settingTab?.unload()
+		emitCancelSync()
+		try {
+			await this.chatService.onunload()
+		} catch (error) {
+			logger.error('Failed to flush chat sessions on unload', error)
+		}
+		await this.diagnosticsLogFile.flush()
+		await Promise.all(
+			[...this.services]
+				.reverse()
+				.filter((service) => service !== this.chatService)
+				.map((service) =>
+					Promise.resolve(service.onunload()).catch((error) => {
+						logger.error('Failed to unload service', error)
+					}),
+				),
+		)
 	}
 
 	toggleSyncUI(isSyncing: boolean) {

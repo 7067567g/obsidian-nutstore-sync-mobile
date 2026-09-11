@@ -4,7 +4,8 @@ import {
 	createEmptyMasterAgent,
 	uiMessagesToModelMessages,
 } from '~/ai/chat/messages/ui-message'
-import { buildTimeline } from './view-projection'
+import type { AppUIMessage, ChatAgentState } from '~/ai/chat/types'
+import { buildAgentViews, buildTimeline } from './view-projection'
 import { taskTool } from '~/ai/tools/task'
 
 describe('buildTimeline', () => {
@@ -56,6 +57,115 @@ describe('buildTimeline', () => {
 		expect(block.fileChanges).toEqual(master.operations.message)
 	})
 
+	it('reuses the cached timeline until an immutable text-part update changes it', () => {
+		const master = createEmptyMasterAgent(1)
+		const message: AppUIMessage = {
+			id: 'message',
+			role: 'assistant',
+			parts: [{ type: 'text', text: 'hello' }],
+		}
+		master.timeline.push(message)
+		const session: ChatSession = {
+			schemaVersion: 2,
+			id: 'session',
+			createdAt: 1,
+			updatedAt: 1,
+			subagents: { master },
+		}
+
+		const first = buildTimeline(session)
+		expect(buildTimeline(session)).toBe(first)
+
+		const part = message.parts[0]
+		if (part?.type !== 'text') throw new Error('Expected text part')
+		message.parts[0] = { ...part, text: 'hello world' }
+
+		const second = buildTimeline(session)
+		expect(second).not.toBe(first)
+		const updated = second[0]?.message.parts[0]
+		if (updated?.type !== 'text') throw new Error('Expected text part')
+		expect(updated.text).toBe('hello world')
+	})
+
+	it('invalidates the projection when a message operations array is replaced', () => {
+		const master = createEmptyMasterAgent(1)
+		const message: AppUIMessage = {
+			id: 'message',
+			role: 'assistant',
+			parts: [
+				{
+					type: 'dynamic-tool',
+					toolName: 'apply_patch',
+					toolCallId: 'call',
+					state: 'output-available',
+					input: {},
+					output: {},
+				},
+			],
+		}
+		master.timeline.push(message)
+		const session: ChatSession = {
+			schemaVersion: 2,
+			id: 'session',
+			createdAt: 1,
+			updatedAt: 1,
+			subagents: { master },
+		}
+
+		const first = buildTimeline(session)
+		const firstBlock = first[0]?.displayBlocks[0]
+		if (firstBlock?.kind !== 'tool-call') throw new Error('Expected tool block')
+		expect(firstBlock.fileChanges).toBeUndefined()
+
+		master.operations.message = [
+			{
+				vaultPath: 'note.md',
+				operation: 'update',
+				before: { kind: 'file', contentBase64: 'YQ==' },
+				after: { kind: 'file', contentBase64: 'Yg==' },
+				toolCallId: 'call',
+			},
+		]
+
+		const second = buildTimeline(session)
+		expect(second).not.toBe(first)
+		const secondBlock = second[0]?.displayBlocks[0]
+		if (secondBlock?.kind !== 'tool-call')
+			throw new Error('Expected tool block')
+		expect(secondBlock.fileChanges).toHaveLength(1)
+	})
+
+	it('reuses cached child timelines in buildAgentViews', () => {
+		const master = createEmptyMasterAgent(1)
+		const child: ChatAgentState = createEmptyMasterAgent(2)
+		child.id = 'child'
+		child.type = 'explorer'
+		child.timeline.push({
+			id: 'child-message',
+			role: 'assistant',
+			parts: [{ type: 'text', text: 'child output' }],
+		})
+		master.subagents.child = child
+		const session: ChatSession = {
+			schemaVersion: 2,
+			id: 'session',
+			createdAt: 1,
+			updatedAt: 1,
+			subagents: { master },
+		}
+
+		const first = buildAgentViews(session)
+		const second = buildAgentViews(session)
+		expect(second.child?.timeline).toBe(first.child?.timeline)
+
+		child.timeline.push({
+			id: 'child-message-2',
+			role: 'assistant',
+			parts: [{ type: 'text', text: 'more' }],
+		})
+		const third = buildAgentViews(session)
+		expect(third.child?.timeline).not.toBe(first.child?.timeline)
+	})
 	it('keeps reactive metadata out of task results sent back to the model', async () => {
 		const master = createEmptyMasterAgent(1)
 		const output = { taskId: 'explorer-one', status: 'dispatched' }

@@ -5,33 +5,9 @@ import {
 	formatSystemNotificationMarkdown,
 	formatTime,
 	formatToolDetailsMarkdown,
-	shouldSubmitChatInput,
 	toolCallDisplayTitle,
 	toolCallPurpose,
 } from './utils'
-
-describe('shouldSubmitChatInput', () => {
-	const enterEvent = {
-		key: 'Enter',
-		shiftKey: false,
-		isComposing: false,
-		keyCode: 13,
-	}
-
-	it('submits a plain Enter key', () => {
-		expect(shouldSubmitChatInput(enterEvent, false)).toBe(true)
-	})
-
-	it('does not submit while an IME composition is being confirmed', () => {
-		expect(shouldSubmitChatInput({ ...enterEvent, keyCode: 229 }, false)).toBe(
-			false,
-		)
-		expect(
-			shouldSubmitChatInput({ ...enterEvent, isComposing: true }, false),
-		).toBe(false)
-		expect(shouldSubmitChatInput(enterEvent, true)).toBe(false)
-	})
-})
 
 describe('formatTime', () => {
 	it('falls back without Intl', () => {

@@ -599,7 +599,7 @@ export class SessionProcessor {
 			active.turn.turnId,
 		)
 		if (!changed) return
-		void this.store.persistSession(session)
+		this.store.persistSessionSoon(session)
 		this.notify()
 		this.subagentCancellation.startQueuedAgentsForSession(session)
 	}

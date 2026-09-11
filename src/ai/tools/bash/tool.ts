@@ -36,6 +36,7 @@ export const bashTool = tool({
 	description: [
 		`Execute a browser-based bash subset against a virtual filesystem where the Obsidian vault is rooted at ${VAULT_MOUNT_POINT}, agent data is available at ${AGENTS_MOUNT_POINT}, built-in Skills are read-only under ${BUILTIN_SKILLS_MOUNT_POINT}, and plugin settings are editable at ${SETTINGS_MOUNT_POINT}/settings.json.`,
 		'This is not the host shell: node, python, xxd, and some command flags are unavailable.',
+		'For ordinary vault note listing, reading, and content search, prefer the native vault_list / vault_read / vault_grep tools. Use this bash tool only when you need shell pipelines or non-vault filesystem access.',
 		'Prefer supported commands such as ls, cat, rg, jq, sed, awk, od, gzip, gunzip, zcat, zip, unzip, mkdir, mv, cp, and rm. zip and unzip support standard store/deflate archives, but not encrypted, Zip64, or uncommon compression formats.',
 		`Wildcards expand against a snapshot index of the vault (notes and attachments, plus ${AGENTS_MOUNT_POINT}); other hidden dot-folders are not in that index, so globs can report no matches for files that do exist. When a glob or rg finds nothing, list the parent directory or read the explicit path directly before concluding a file is missing.`,
 		`Treat the filesystem root as the user's personal knowledge base — only write there for content the user intends to keep; use ${BASH_TMP_MOUNT_POINT} for intermediate or scratch work.`,

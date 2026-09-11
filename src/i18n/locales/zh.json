@@ -186,7 +186,12 @@
 			"model": {
 				"id": "模型 ID",
 				"idDesc": "请求 API 时使用的模型标识（如 gpt-4o）",
-				"inputModalities": "输入模态"
+				"inputModalities": "输入模态",
+				"contextWindow": "上下文窗口",
+				"contextWindowDesc": "模型声明的最大上下文 token 数。支持 1M、256K、1000000 等写法。设为 0 时使用服务商默认值；若服务商未提供上限，插件才会回退到 256K。",
+				"maxOutputTokens": "最大输出 token",
+				"maxOutputTokensDesc": "模型单次回复最多生成的 token 数。支持 1M、256K、1000000 等写法。设为 0 时使用服务商默认值。",
+				"limitPlaceholder": "例如 1000000、1M、256K"
 			},
 			"modals": {
 				"confirmDeleteLabel": "确认",
@@ -289,6 +294,14 @@
 				"networkDisconnected": "网络连接不可用，请检查网络后重试。",
 				"browserCorsFallbackToBuiltinTransport": "浏览器跨域请求失败，已临时回退到内置请求方式。",
 				"browserCorsFailedWithDisableLink": "浏览器跨域请求失败。[打开此提供商并关闭 CORS]({{link}})。"
+			},
+			"sessionStorage": {
+				"name": "操作内联上限（KB）",
+				"desc": "超过此大小的操作快照会存到会话旁的独立文件。值越小，移动端会话文件越轻；值越大，保留在内联会话文件里的 diff 越多。默认 256 KB。"
+			},
+			"windowedRendering": {
+				"name": "长会话窗口化渲染",
+				"desc": "使用浏览器原生 content-visibility 跳过屏幕外消息的布局/绘制。关闭后回退到旧的全量渲染。"
 			}
 		},
 		"confirmBeforeSync": {
@@ -404,7 +417,25 @@
 			"clearDesc": "删除所有控制台输出记录"
 		},
 		"troubleshooting": {
-			"title": "排障"
+			"title": "排障",
+			"exportName": "导出诊断包",
+			"exportDesc": "收集启动自检、最近日志、持久化/渲染耗时与桥调用统计，写入 .agents/nutstore-sync/diagnostics/ 下的 JSON 文件。",
+			"exportButton": "导出诊断包",
+			"exported": "诊断包已导出：{{fileName}}",
+			"exportError": "导出诊断包失败：{{message}}",
+			"localOnlyName": "会话与配置仅本机",
+			"localOnlyDesc": "聊天会话、插件配置和本地设置只保存在当前设备，不参与坚果云同步。请定期使用下方备份功能导出配置。",
+			"backupName": "备份本地配置",
+			"backupDesc": "把插件设置与本地设置导出到 .agents/nutstore-sync/backups/ 下的 JSON 文件。",
+			"backupButton": "备份配置",
+			"backupDone": "配置已备份到：{{filePath}}",
+			"backupFailed": "备份配置失败，详见日志。",
+			"restoreName": "从最近备份恢复",
+			"restoreDesc": "读取 backups/ 目录中最新的配置备份并覆盖当前设置；恢复前请先自行留档。",
+			"restoreButton": "恢复配置",
+			"restored": "已从备份恢复：{{filePath}}",
+			"restoreFailed": "恢复配置失败：{{message}}",
+			"restoreNoBackup": "没有可用备份文件"
 		},
 		"cache": {
 			"title": "缓存管理",
@@ -454,6 +485,8 @@
 		"readonly": "该 agent 是只读的，不能修改文件。尝试的操作：{{summary}}",
 		"source": "源路径",
 		"destination": "目标路径",
+		"batchFiles": "本次将影响 {{count}} 个文件：",
+		"andMore": "另有 {{count}} 个",
 		"operations": {
 			"read": "读取",
 			"write": "写入",
@@ -504,6 +537,9 @@
 				"language": {
 					"name": "语言",
 					"auto": "自动"
+				},
+				"aiModelLimits": {
+					"name": "模型上下文/输出上限"
 				}
 			}
 		}
@@ -720,7 +756,8 @@
 				"create": "新增",
 				"update": "修改",
 				"delete": "删除",
-				"binary": "二进制文件，无法显示文本差异"
+				"binary": "二进制文件，无法显示文本差异",
+				"snapshotMissing": "快照未保留，无法撤销"
 			},
 			"states": {
 				"loading": "正在恢复聊天…",
@@ -746,7 +783,7 @@
 				"todoEmpty": "暂无待办"
 			},
 			"placeholders": {
-				"input": "输入消息，Enter 发送，Shift+Enter 换行"
+				"input": "输入消息，点击发送"
 			},
 			"dialogs": {
 				"subagentTimeline": {

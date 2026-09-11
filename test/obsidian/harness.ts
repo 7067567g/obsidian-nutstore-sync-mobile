@@ -1,5 +1,9 @@
 import { Plugin } from 'obsidian'
-import { persistsChatSessions, toleratesCorruptChatMeta } from './checks/chat'
+import {
+	externalizesLargeChatOperations,
+	persistsChatSessions,
+	toleratesCorruptChatMeta,
+} from './checks/chat'
 import {
 	detachesChatboxWhenProductionPluginIsDisabled,
 	loadsProductionPlugin,
@@ -92,6 +96,10 @@ export default class NutstoreSyncIntegrationHarness extends Plugin {
 		)
 		await run('persists chat sessions through the real DataAdapter', () =>
 			persistsChatSessions(this.app),
+		)
+		await run(
+			'externalizes large chat operations through the real DataAdapter',
+			() => externalizesLargeChatOperations(this.app),
 		)
 		await run(
 			'skips a stale Vault Skill entry without hiding stable Skills',

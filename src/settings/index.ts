@@ -156,6 +156,10 @@ export interface NutstoreSettings {
 			memory: SubagentSettings
 		}
 		nutstoreLlmGateway?: NutstoreLlmGatewayAuthSettings
+		/** Serialized size above which a message's operations move to a sidecar file. */
+		maxInlineOperationBytes?: number
+		/** Browser-native content-visibility windowing for long chat timelines. */
+		windowedRendering?: boolean
 	}
 	configDirSyncMode?: 'none' | 'bookmarks' | 'all'
 }
@@ -234,6 +238,7 @@ export const DEFAULT_SETTINGS: NutstoreSettings = {
 			memory: { enabled: false },
 		},
 		nutstoreLlmGateway: {},
+		maxInlineOperationBytes: 256 * 1024,
 	},
 	configDirSyncMode: 'none',
 }

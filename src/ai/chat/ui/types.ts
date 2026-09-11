@@ -79,6 +79,8 @@ interface ChatboxViewModel {
 	usage?: LanguageModelUsage
 	/** Total context window (tokens) of the active model, or undefined when no model is selected. */
 	contextWindow?: number
+	/** Use browser-native content-visibility windowing for long timelines. */
+	windowedRendering?: boolean
 }
 
 export interface RecallMessageResult {

@@ -22,6 +22,7 @@ import { ConfirmDialog } from './components/ConfirmDialog'
 import { ContextArea } from './components/ContextArea'
 import { ContextRing } from './components/ContextRing'
 import { McpServersDialog } from './components/McpServersDialog'
+import { shouldWindowTimeline } from '~/ai/chat/ui/message-window'
 import { MessageCard } from './components/MessageCard'
 import { ModelPickerDialog } from './components/ModelPickerDialog'
 import { PaneResizer } from './components/PaneResizer'
@@ -30,7 +31,6 @@ import { RunStateCard } from './components/RunStateCard'
 import { SessionHistorySheet } from './components/SessionHistorySheet'
 import { SubagentTimelineDialog } from './components/SubagentTimelineDialog'
 import { decideDropRoute, hasDragItems } from './drop-utils'
-import { shouldSubmitChatInput } from './utils'
 
 const INPUT_HEIGHT_STORAGE_KEY = 'nutstore-sync.chatbox.input-height'
 const LEGACY_INPUT_HEIGHT_STORAGE_KEY =
@@ -72,8 +72,10 @@ function isSupportedPickedFile(file: File): boolean {
 function Chatbox(props: ChatboxProps) {
 	type RecallArmedMode = 'only' | 'restore'
 	const [input, setInput] = createSignal('')
-	const [isComposing, setIsComposing] = createSignal(false)
 	const [historyOpen, setHistoryOpen] = createSignal(false)
+	const windowedTimeline = () =>
+		props.windowedRendering !== false &&
+		shouldWindowTimeline(props.timeline.length)
 	const [selectedAgentId, setSelectedAgentId] = createSignal<string>()
 	const [modelPickerOpen, setModelPickerOpen] = createSignal(false)
 	const [sessionPendingDeleteId, setSessionPendingDeleteId] =
@@ -914,6 +916,7 @@ function Chatbox(props: ChatboxProps) {
 									{(item) => (
 										<MessageCard
 											item={item}
+											windowed={windowedTimeline()}
 											now={now()}
 											renderMarkdown={props.renderMarkdown}
 											streaming={item.message.id === streamingMessageId()}
@@ -985,14 +988,7 @@ function Chatbox(props: ChatboxProps) {
 								event.preventDefault()
 								void addPickedFiles(imageFiles)
 							}}
-							onCompositionStart={() => setIsComposing(true)}
-							onCompositionEnd={() => setIsComposing(false)}
-							onKeyDown={(event) => {
-								if (shouldSubmitChatInput(event, isComposing())) {
-									event.preventDefault()
-									void submit()
-								}
-							}}
+							enterkeyhint="enter"
 						/>
 
 						<div class=":uno: mt-3 flex items-center justify-between gap-3">

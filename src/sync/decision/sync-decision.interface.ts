@@ -17,7 +17,7 @@ export interface SyncDecisionSettings {
 export interface SyncRecordItem {
 	remote: StatModel
 	local: StatModel
-	base?: { key: string }
+	base?: { key: string; hash?: string }
 }
 
 export interface TaskOptions {
@@ -68,5 +68,6 @@ export interface SyncDecisionInput {
 		filePath: string,
 		baseContent: ArrayBuffer,
 	) => Promise<boolean>
+	getLocalContentHash?: (filePath: string) => Promise<string | undefined>
 	taskFactory: TaskFactory
 }

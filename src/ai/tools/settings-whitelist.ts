@@ -5,6 +5,7 @@ import type { NutstoreSettings } from '~/settings'
 import type { GlobFilterRule } from '~/utils/glob-match'
 import GlobMatch, { isVoidGlobMatchOptions } from '~/utils/glob-match'
 import { normalizeByteSizeInput } from '~/utils/download-chunk-size'
+import { tryParseTokenLimitInput } from '~/utils/token-limit'
 
 /**
  * The subset of plugin settings the AI agent is allowed to read and modify
@@ -21,6 +22,13 @@ export type WhitelistFilterRule = {
 	disabled?: boolean
 }
 
+export interface AIModelLimitWhitelistEntry {
+	providerId: string
+	modelId: string
+	context?: number
+	output?: number
+}
+
 export type SettingsWhitelistFile = {
 	filterRules?: { rules: WhitelistFilterRule[] }
 	skipLargeFiles?: { maxSize?: string }
@@ -33,6 +41,7 @@ export type SettingsWhitelistFile = {
 	conflictStrategy?: NutstoreSettings['conflictStrategy']
 	configDirSyncMode?: 'none' | 'bookmarks' | 'all'
 	language?: 'zh' | 'en' | ''
+	aiModelLimits?: AIModelLimitWhitelistEntry[]
 }
 
 export type NormalizedSettingsPatch = {
@@ -47,6 +56,7 @@ export type NormalizedSettingsPatch = {
 	conflictStrategy?: NutstoreSettings['conflictStrategy']
 	configDirSyncMode?: 'none' | 'bookmarks' | 'all'
 	language?: 'zh' | 'en' | ''
+	aiModelLimits?: AIModelLimitWhitelistEntry[]
 }
 
 export type SettingsParseResult =
@@ -90,6 +100,18 @@ export function applyNormalizedSettingsPatch(
 	if (patch.language !== undefined) {
 		settings.language = patch.language || undefined
 	}
+	if (patch.aiModelLimits !== undefined) {
+		for (const entry of patch.aiModelLimits) {
+			const model =
+				settings.ai?.providers?.[entry.providerId]?.models?.[entry.modelId]
+			if (!model) continue
+			model.limit = {
+				...model.limit,
+				...(entry.context !== undefined ? { context: entry.context } : {}),
+				...(entry.output !== undefined ? { output: entry.output } : {}),
+			}
+		}
+	}
 }
 
 const MAX_FILE_SIZE = '500MB'
@@ -121,6 +143,7 @@ const WHITELIST_KEYS = new Set([
 	'conflictStrategy',
 	'configDirSyncMode',
 	'language',
+	'aiModelLimits',
 ])
 
 type JsonObject = Record<string, unknown>
@@ -278,6 +301,83 @@ function parseEnum(
 	return { value, error: null }
 }
 
+const MAX_AI_MODEL_LIMIT_ENTRIES = 500
+
+function parseAIModelLimits(value: unknown): {
+	entries: AIModelLimitWhitelistEntry[]
+	error: string | null
+} {
+	if (!Array.isArray(value)) {
+		return { entries: [], error: jsonError('aiModelLimits', 'an array') }
+	}
+	if (value.length > MAX_AI_MODEL_LIMIT_ENTRIES) {
+		return {
+			entries: [],
+			error: `invalid setting 'aiModelLimits': too many entries (max ${MAX_AI_MODEL_LIMIT_ENTRIES})`,
+		}
+	}
+	const entries: AIModelLimitWhitelistEntry[] = []
+	for (let index = 0; index < value.length; index += 1) {
+		const name = `aiModelLimits[${index}]`
+		const entry = value[index]
+		if (!isObject(entry))
+			return { entries: [], error: jsonError(name, 'an object') }
+		const providerId = entry.providerId
+		const modelId = entry.modelId
+		if (typeof providerId !== 'string' || providerId.trim() === '') {
+			return {
+				entries: [],
+				error: jsonError(`${name}.providerId`, 'a non-empty string'),
+			}
+		}
+		if (typeof modelId !== 'string' || modelId.trim() === '') {
+			return {
+				entries: [],
+				error: jsonError(`${name}.modelId`, 'a non-empty string'),
+			}
+		}
+		const context =
+			entry.context === undefined
+				? undefined
+				: tryParseTokenLimitInput(entry.context)
+		const output =
+			entry.output === undefined
+				? undefined
+				: tryParseTokenLimitInput(entry.output)
+		if (entry.context !== undefined && context === null) {
+			return {
+				entries: [],
+				error: jsonError(
+					`${name}.context`,
+					'a token count like 1000000, 1M, or 256K',
+				),
+			}
+		}
+		if (entry.output !== undefined && output === null) {
+			return {
+				entries: [],
+				error: jsonError(
+					`${name}.output`,
+					'a token count like 1000000, 1M, or 256K',
+				),
+			}
+		}
+		if (context === undefined && output === undefined) {
+			return {
+				entries: [],
+				error: jsonError(name, 'at least one of context or output'),
+			}
+		}
+		entries.push({
+			providerId: providerId.trim(),
+			modelId: modelId.trim(),
+			...(context === null || context === undefined ? {} : { context }),
+			...(output === null || output === undefined ? {} : { output }),
+		})
+	}
+	return { entries, error: null }
+}
+
 export function parseSettingsWhitelistJson(text: string): SettingsParseResult {
 	let parsed: unknown
 	try {
@@ -402,6 +502,12 @@ export function parseSettingsWhitelistJson(text: string): SettingsParseResult {
 		}
 		patch.configDirSyncMode = value as 'none' | 'bookmarks' | 'all'
 	}
+	if (!isNil(parsed.aiModelLimits)) {
+		const { entries, error } = parseAIModelLimits(parsed.aiModelLimits)
+		if (error) return { ok: false, error }
+		patch.aiModelLimits = entries
+	}
+
 	if (!isNil(parsed.language)) {
 		const { value, error } = parseEnum(
 			'language',
@@ -447,6 +553,15 @@ export function serializeSettingsWhitelist(settings: NutstoreSettings): string {
 		conflictStrategy: settings.conflictStrategy,
 		configDirSyncMode: settings.configDirSyncMode ?? 'none',
 		language: settings.language ?? '',
+		aiModelLimits: Object.entries(settings.ai?.providers ?? {}).flatMap(
+			([providerId, provider]) =>
+				Object.entries(provider.models ?? {}).map(([modelId, model]) => ({
+					providerId,
+					modelId,
+					context: model.limit?.context ?? 0,
+					output: model.limit?.output ?? 0,
+				})),
+		),
 	}
 	return `${JSON.stringify(file, null, 2)}\n`
 }
@@ -552,6 +667,21 @@ export function getChangedSettingsPatch(
 	) {
 		changes.language = patch.language
 	}
+	if (patch.aiModelLimits !== undefined) {
+		const changedLimits = patch.aiModelLimits.filter((entry) => {
+			const model =
+				settings.ai?.providers?.[entry.providerId]?.models?.[entry.modelId]
+			if (!model) return true
+			return (
+				(entry.context !== undefined &&
+					entry.context !== model.limit?.context) ||
+				(entry.output !== undefined && entry.output !== model.limit?.output)
+			)
+		})
+		if (changedLimits.length > 0) {
+			changes.aiModelLimits = changedLimits
+		}
+	}
 	return changes
 }
 
@@ -631,6 +761,19 @@ export function describeSettingsPatch(
 		lines.push(
 			`${i18n.t('aiPermission.settings.fields.language.name')}: ${patch.language === '' ? i18n.t('aiPermission.settings.fields.language.auto') : patch.language}`,
 		)
+	}
+	if (patch.aiModelLimits !== undefined) {
+		for (const entry of patch.aiModelLimits.slice(0, 8)) {
+			const limits = [
+				entry.context !== undefined ? `context=${entry.context}` : '',
+				entry.output !== undefined ? `output=${entry.output}` : '',
+			]
+				.filter(Boolean)
+				.join(', ')
+			lines.push(
+				`${i18n.t('aiPermission.settings.fields.aiModelLimits.name')}: ${entry.providerId}/${entry.modelId} ${limits}`,
+			)
+		}
 	}
 	return lines
 }

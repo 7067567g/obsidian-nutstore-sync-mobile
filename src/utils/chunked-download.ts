@@ -1,8 +1,8 @@
 import { normalizePath, Platform, Vault } from 'obsidian'
 import { dirname } from 'path-browserify'
 import type { BufferLike, WebDAVClient } from 'webdav'
+import { atomicReplaceContent, atomicReplaceFromTemp } from './atomic-replace'
 import { parseMobileAppDownloadFileChunkSize } from './download-chunk-size'
-import { writeLocalBinary } from './local-vault-io'
 import logger from './logger'
 import { mkdirsVault } from './mkdirs-vault'
 
@@ -14,6 +14,14 @@ export interface DownloadRemoteFileOptions {
 	remoteSize: number
 	mobileAppDownloadFileChunkSize?: string
 }
+
+interface RangeResponse {
+	status: number
+	arrayBuffer(): Promise<ArrayBuffer>
+	headers?: { get(name: string): string | null }
+}
+
+class RangeFallbackWholeDownloadError extends Error {}
 
 export async function downloadRemoteFile(options: DownloadRemoteFileOptions) {
 	if (!Platform.isMobileApp) {
@@ -30,21 +38,32 @@ export function bufferLikeToArrayBuffer(buffer: BufferLike): ArrayBuffer {
 	return toArrayBuffer(buffer)
 }
 
-function concatenateChunks(chunks: ArrayBuffer[], totalSize: number) {
-	const result = new ArrayBuffer(totalSize)
-	const resultView = new Uint8Array(result)
-	let offset = 0
-
-	for (const chunk of chunks) {
-		resultView.set(new Uint8Array(chunk), offset)
-		offset += chunk.byteLength
+function validateContentRange(
+	response: RangeResponse,
+	offset: number,
+	expectedTotal: number,
+) {
+	let contentRange: string | null
+	try {
+		contentRange = response.headers?.get?.('content-range') ?? null
+	} catch {
+		contentRange = null
 	}
-
-	if (offset !== totalSize) {
-		throw new Error('Remote Size Not Match!')
+	if (!contentRange) return
+	const match = /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i.exec(contentRange.trim())
+	if (!match) return
+	const start = Number.parseInt(match[1], 10)
+	const total = match[3] === '*' ? undefined : Number.parseInt(match[3], 10)
+	if (start !== offset) {
+		throw new Error(
+			`Range response starts at ${start}, expected offset ${offset}`,
+		)
 	}
-
-	return result
+	if (total !== undefined && total !== expectedTotal) {
+		throw new Error(
+			`Range response total ${total} does not match remote size ${expectedTotal}`,
+		)
+	}
 }
 
 async function downloadRemoteFileWhole({
@@ -62,8 +81,7 @@ async function downloadRemoteFileWhole({
 	if (arrayBuffer.byteLength !== remoteSize) {
 		throw new Error('Remote Size Not Match!')
 	}
-	await mkdirsVault(vault, dirname(localPath))
-	await writeLocalBinary(vault, localPath, arrayBuffer)
+	await atomicReplaceContent(vault, localPath, arrayBuffer, 'binary')
 }
 
 async function downloadRemoteFileInChunks({
@@ -78,16 +96,39 @@ async function downloadRemoteFileInChunks({
 	await mkdirsVault(vault, dirname(normalizedLocalPath))
 
 	if (remoteSize === 0) {
-		await writeLocalBinary(vault, normalizedLocalPath, new ArrayBuffer(0))
+		await atomicReplaceContent(
+			vault,
+			normalizedLocalPath,
+			new ArrayBuffer(0),
+			'binary',
+		)
 		return
 	}
 
-	const appendBinary = (
-		vault.adapter as unknown as {
-			appendBinary?: (path: string, data: ArrayBuffer) => Promise<void>
-		}
-	).appendBinary?.bind(vault.adapter)
-	const chunks: ArrayBuffer[] = []
+	const adapter = vault.adapter as unknown as {
+		appendBinary?: (path: string, data: ArrayBuffer) => Promise<void>
+	}
+	const appendBinary =
+		typeof adapter.appendBinary === 'function'
+			? adapter.appendBinary.bind(adapter)
+			: undefined
+
+	if (!appendBinary) {
+		// Never accumulate chunks in memory: on older adapters fall back to a
+		// single whole-file request with an explicit diagnostic.
+		logger.warn(
+			'[ChunkedDownload] adapter.appendBinary is unavailable; falling back to whole-file download instead of in-memory concatenation',
+		)
+		await downloadRemoteFileWhole({
+			vault,
+			webdav,
+			remotePath,
+			localPath,
+			remoteSize,
+			mobileAppDownloadFileChunkSize,
+		})
+		return
+	}
 
 	const chunkSize = parseMobileAppDownloadFileChunkSize(
 		mobileAppDownloadFileChunkSize,
@@ -107,58 +148,78 @@ async function downloadRemoteFileInChunks({
 	try {
 		while (offset < remoteSize) {
 			const end = Math.min(offset + chunkSize, remoteSize) - 1
-			const response = await webdav.customRequest(remotePath, {
+			const response = (await webdav.customRequest(remotePath, {
 				method: 'GET',
 				headers: {
 					Range: `bytes=${offset}-${end}`,
 				},
-			})
-			if (response.status !== 206) {
-				throw new Error(`Range download failed with status ${response.status}`)
+			})) as unknown as RangeResponse
+
+			if (response.status === 206) {
+				validateContentRange(response, offset, remoteSize)
+				const chunk = await response.arrayBuffer()
+				const expectedLength = end - offset + 1
+				if (chunk.byteLength !== expectedLength) {
+					throw new Error(
+						`Remote chunk size not match: got ${chunk.byteLength}, expected ${expectedLength}`,
+					)
+				}
+				if (offset === 0) {
+					await vault.adapter.writeBinary(tempPath, chunk)
+				} else {
+					await appendBinary(tempPath, chunk)
+				}
+				offset += chunk.byteLength
+				chunkIndex++
+				if (chunkIndex % 5 === 0) {
+					logger.debug(
+						`[ChunkedDownload] progress ${offset}/${remoteSize} bytes (chunk #${chunkIndex})`,
+					)
+				}
+				continue
 			}
-			const chunk = await response.arrayBuffer()
-			const expectedLength = end - offset + 1
-			if (chunk.byteLength !== expectedLength) {
-				throw new Error('Remote chunk size not match!')
+
+			if (response.status === 200) {
+				if (offset > 0) {
+					// A proxy/server ignored Range after we already wrote chunks.
+					// Discard the partial temp file and explicitly fall back to a
+					// whole-file request instead of appending a full body.
+					throw new RangeFallbackWholeDownloadError(
+						'Range request was ignored after the first chunk',
+					)
+				}
+				const whole = await response.arrayBuffer()
+				if (whole.byteLength !== remoteSize) {
+					throw new Error('Remote Size Not Match!')
+				}
+				await atomicReplaceContent(vault, normalizedLocalPath, whole, 'binary')
+				logger.info('[ChunkedDownload] server ignored Range; stored whole file')
+				return
 			}
-			if (appendBinary && offset === 0) {
-				await vault.adapter.writeBinary(tempPath, chunk)
-			} else if (appendBinary) {
-				await appendBinary(tempPath, chunk)
-			} else {
-				chunks.push(chunk)
-			}
-			offset += chunk.byteLength
-			chunkIndex++
-			if (chunkIndex % 5 === 0) {
-				logger.debug(
-					`[ChunkedDownload] progress ${offset}/${remoteSize} bytes (chunk #${chunkIndex})`,
-				)
-			}
+
+			throw new Error(`Range download failed with status ${response.status}`)
 		}
 
 		if (offset !== remoteSize) {
 			throw new Error('Remote Size Not Match!')
 		}
-		if (appendBinary) {
-			if (await vault.adapter.exists(normalizedLocalPath)) {
-				await vault.adapter.remove(normalizedLocalPath)
-			}
-			await vault.adapter.rename(tempPath, normalizedLocalPath)
-		} else {
-			logger.warn(
-				'[ChunkedDownload] adapter.appendBinary is unavailable; assembling chunks in memory',
-			)
-			await writeLocalBinary(
-				vault,
-				normalizedLocalPath,
-				concatenateChunks(chunks, remoteSize),
-			)
-		}
+		await atomicReplaceFromTemp(vault, tempPath, normalizedLocalPath)
 		logger.info(`[ChunkedDownload] done ${remotePath} (${chunkIndex} chunks)`)
 	} catch (error) {
-		if (appendBinary) {
-			await removeTempDownload(vault, tempPath)
+		await removeTempDownload(vault, tempPath)
+		if (error instanceof RangeFallbackWholeDownloadError) {
+			logger.warn(
+				'[ChunkedDownload] Range was ignored after the first chunk; falling back to whole-file download',
+			)
+			await downloadRemoteFileWhole({
+				vault,
+				webdav,
+				remotePath,
+				localPath,
+				remoteSize,
+				mobileAppDownloadFileChunkSize,
+			})
+			return
 		}
 		throw error
 	}

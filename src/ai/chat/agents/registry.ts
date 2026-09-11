@@ -35,6 +35,7 @@ const MASTER_SYSTEM_PROMPT = [
 	'Treat every Skill path as an opaque absolute path: copy it exactly from workspace context and never construct, normalize, or substitute a different path from the Skill name.',
 	'Paths under /.agents/skills are user-defined Vault Skills; paths under /.agents/nutstore-sync/builtin-skills are bundled built-in Skills. These namespaces are distinct and are not interchangeable.',
 	'Hidden dot-folders are internal; do not expose their paths or contents unless the user explicitly asks about them. Never guess or fabricate credentials.',
+	'Prefer native vault_list, vault_read, vault_grep, vault_links, vault_frontmatter, vault_batch_edit, view_pdf, settings_read, and settings_patch tools over bash for ordinary vault, agent-data, and plugin-settings operations. Use bash only when a shell pipeline or unsupported path is actually required.',
 	'Long-term memory is handled exclusively by the memory subagent when that task type is available. When the request needs cross-session history, or needs to preserve, correct, or forget memory, dispatch a bounded memory task with the relevant facts, retrieval target, and expected result. If it is unavailable, say long-term memory is disabled rather than accessing its files. Do not read, search, or modify .agents/nutstore-sync/memory yourself.',
 ].join('\n')
 
@@ -45,6 +46,7 @@ const EXPLORER_SYSTEM_PROMPT = [
 	'Base every conclusion on tool output and cite the file paths or commands that support it.',
 	'When citing vault files, use their vault-relative path (for example notes/idea.md), matching the path the user sees inside the vault.',
 	'Hidden dot-folders are internal; do not expose their paths or contents unless the task explicitly asks to inspect them.',
+	'Prefer native vault_list, vault_read, vault_grep, vault_links, and view_pdf tools over bash for ordinary vault and agent-data inspection.',
 	'If evidence is insufficient or conflicting, say so explicitly rather than guessing.',
 	'Return a concise, grounded final answer. Do not ask questions — make reasonable assumptions and note any limitations.',
 ].join('\n')
@@ -67,6 +69,15 @@ function createMasterAgentDefinition(
 		description: 'Main conversational assistant with full vault access.',
 		systemPrompt: MASTER_SYSTEM_PROMPT,
 		tools: [
+			'vault_list',
+			'vault_read',
+			'vault_grep',
+			'vault_links',
+			'vault_frontmatter',
+			'vault_batch_edit',
+			'view_pdf',
+			'settings_read',
+			'settings_patch',
 			'bash',
 			'apply_patch',
 			'view_image',
@@ -88,7 +99,16 @@ function createExplorerAgentDefinition(
 		description:
 			'Read-only subagent for exploring the vault and answering questions about its contents without modifying files.',
 		systemPrompt: EXPLORER_SYSTEM_PROMPT,
-		tools: ['bash', 'view_image', ...(canDispatch ? ['task'] : [])],
+		tools: [
+			'vault_list',
+			'vault_read',
+			'vault_grep',
+			'vault_links',
+			'view_pdf',
+			'bash',
+			'view_image',
+			...(canDispatch ? ['task'] : []),
+		],
 		permissionMode: 'readonly',
 		dispatchable: enabled,
 	}

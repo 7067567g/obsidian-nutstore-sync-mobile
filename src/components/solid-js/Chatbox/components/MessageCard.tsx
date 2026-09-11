@@ -1,5 +1,6 @@
 import { For, Match, Show, Switch } from 'solid-js'
 import type { ChatDisplayBlock } from '~/ai/chat/types'
+import { messageWindowStyle } from '~/ai/chat/ui/message-window'
 import type {
 	ChatAgentView,
 	ChatTimelineMessageItem,
@@ -130,6 +131,7 @@ export function MessageCard(props: {
 	now: number
 	renderMarkdown?: ChatboxProps['renderMarkdown']
 	streaming?: boolean
+	windowed?: boolean
 	onDeleteMessage?: ChatboxProps['onDeleteMessage']
 	onRegenerateMessage?: ChatboxProps['onRegenerateMessage']
 	onRecallMessage?: ChatboxProps['onRecallMessage']
@@ -189,6 +191,7 @@ export function MessageCard(props: {
 					? ':uno: text-[var(--text-error)]'
 					: undefined
 			}
+			style={messageWindowStyle(!!props.windowed)}
 		>
 			<Show when={props.item.showHeader && !isSystemNotification()}>
 				<div class=":uno: mb-2 flex items-center justify-between gap-3 px-1 text-xs text-[var(--text-muted)]">

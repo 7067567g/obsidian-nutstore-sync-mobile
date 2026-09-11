@@ -108,18 +108,36 @@ export interface ReversibleCompressedContent {
 	blob: Blob
 }
 
+export interface ReversibleSkippedSnapshot {
+	/** Byte size of the file whose content was intentionally not retained. */
+	size: number
+	/** Why the snapshot content was omitted. */
+	reason: 'too-large' | 'budget' | 'entries' | 'missing'
+}
+
 export interface ReversibleFileSnapshot {
 	kind: 'file'
 	contentCompressed?: ReversibleCompressedContent
 	contentBase64?: string
+	/**
+	 * Set when the file was intentionally not read/compressed because of the
+	 * mobile snapshot budget. Undo/diff for this operation is unavailable.
+	 */
+	skipped?: ReversibleSkippedSnapshot
+}
+
+export interface ReversibleDirSnapshot {
+	kind: 'dir'
+	/** Set when child contents were not traversed because of the budget. */
+	skipped?: { entries: number; reason: 'entry-budget' | 'byte-budget' }
 }
 
 export type ReversibleToolOp =
 	| {
 			vaultPath: string
 			operation: 'create'
-			before: { kind: 'file' | 'dir' }
-			after?: ReversibleFileSnapshot | { kind: 'dir' }
+			before: { kind: 'file' } | ReversibleDirSnapshot
+			after?: ReversibleFileSnapshot | ReversibleDirSnapshot
 			toolCallId?: string
 	  }
 	| {
@@ -132,7 +150,7 @@ export type ReversibleToolOp =
 	| {
 			vaultPath: string
 			operation: 'delete'
-			before: ReversibleFileSnapshot | { kind: 'dir' }
+			before: ReversibleFileSnapshot | ReversibleDirSnapshot
 			toolCallId?: string
 	  }
 

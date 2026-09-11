@@ -13,7 +13,10 @@ import {
 	isVaultFolder,
 	normalizeReversibleToolOpRecord,
 } from '~/ai/chat/messages/reversible-op-utils'
-import { decodeReversibleFileSnapshot } from '~/ai/chat/messages/reversible-content'
+import {
+	decodeReversibleFileSnapshot,
+	isSkippedFileSnapshot,
+} from '~/ai/chat/messages/reversible-content'
 import { copyUserContextItems } from '~/ai/chat/context/user-context'
 import {
 	captureWorkspaceContexts,
@@ -70,6 +73,12 @@ export async function restoreVirtualReversibleOperations(
 		}
 		if (operation.before.kind === 'dir') {
 			await fs.mkdir(path, { recursive: true })
+			continue
+		}
+		if (isSkippedFileSnapshot(operation.before)) {
+			logger.warn(
+				`Recall restore skipped ${path}: snapshot content was not retained`,
+			)
 			continue
 		}
 		await fs.mkdir(pathPosix.dirname(path), { recursive: true })
@@ -132,7 +141,7 @@ export class MessageOps {
 			agent.timeline.splice(idx, 1)
 			delete agent.operations[target.id]
 		}
-		void this.store.persistSession(session)
+		this.store.persistSessionSoon(session)
 		this.notify()
 	}
 
@@ -396,11 +405,23 @@ export class MessageOps {
 				continue
 			}
 			if (operation.operation === 'update') {
+				if (isSkippedFileSnapshot(operation.before)) {
+					logger.warn(
+						`Recall restore skipped ${operation.vaultPath}: snapshot content was not retained`,
+					)
+					continue
+				}
 				restoreFiles.set(operation.vaultPath, operation.before)
 				continue
 			}
 			if (operation.before.kind === 'dir') {
 				restoreDirs.add(operation.vaultPath)
+				continue
+			}
+			if (isSkippedFileSnapshot(operation.before)) {
+				logger.warn(
+					`Recall restore skipped ${operation.vaultPath}: snapshot content was not retained`,
+				)
 				continue
 			}
 			restoreFiles.set(operation.vaultPath, operation.before)
@@ -484,6 +505,12 @@ export class MessageOps {
 		path: string,
 		content: Extract<ReversibleToolOp, { operation: 'update' }>['before'],
 	) {
+		if (isSkippedFileSnapshot(content)) {
+			logger.warn(
+				`Recall restore skipped ${path}: snapshot content was not retained`,
+			)
+			return
+		}
 		const data = await decodeReversibleFileSnapshot(content)
 		const existing = this.app.vault.getAbstractFileByPath(path)
 		if (existing && isVaultFolder(existing)) {

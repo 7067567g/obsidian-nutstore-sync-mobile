@@ -228,7 +228,12 @@
 			"model": {
 				"id": "Model ID",
 				"idDesc": "Model identifier sent to the API (e.g. gpt-4o)",
-				"inputModalities": "Input modalities"
+				"inputModalities": "Input modalities",
+				"contextWindow": "Context window",
+				"contextWindowDesc": "Maximum context tokens advertised by the model. Values like 1M, 256K or 1000000 are supported. Set 0 to use the provider default; the plugin only falls back to 256K when the provider publishes no limit.",
+				"maxOutputTokens": "Max output tokens",
+				"maxOutputTokensDesc": "Maximum tokens the model may generate per response. Values like 1M, 256K or 1000000 are supported. Set 0 to use the provider default.",
+				"limitPlaceholder": "e.g. 1000000, 1M, 256K"
 			},
 			"modals": {
 				"confirmDeleteLabel": "Confirm",
@@ -331,6 +336,14 @@
 				"networkDisconnected": "Network connection unavailable. Check your connection and try again.",
 				"browserCorsFallbackToBuiltinTransport": "Browser CORS request failed. Temporarily fell back to the built-in request transport.",
 				"browserCorsFailedWithDisableLink": "Browser CORS request failed. [Open this provider and disable CORS]({{link}})."
+			},
+			"sessionStorage": {
+				"name": "Inline operation limit (KB)",
+				"desc": "Operations larger than this limit are stored in sidecar files next to the session. Lower values keep session files smaller on mobile; higher values keep more diffs inline. Default: 256 KB."
+			},
+			"windowedRendering": {
+				"name": "Windowed rendering for long sessions",
+				"desc": "Use browser-native content-visibility to skip layout/paint for offscreen messages. Disable to fall back to the old full render."
 			}
 		},
 		"logout": {
@@ -404,7 +417,25 @@
 			"clearDesc": "Delete all console output records"
 		},
 		"troubleshooting": {
-			"title": "Troubleshoot"
+			"title": "Troubleshoot",
+			"exportName": "Export diagnostics package",
+			"exportDesc": "Collect startup self-check, recent logs, persistence/render timings, and bridge call counts into a JSON file under .agents/nutstore-sync/diagnostics/.",
+			"exportButton": "Export diagnostics",
+			"exported": "Diagnostics package exported: {{fileName}}",
+			"exportError": "Failed to export diagnostics package: {{message}}",
+			"localOnlyName": "Sessions and config are local-only",
+			"localOnlyDesc": "Chat sessions, plugin settings, and local settings stay on this device and are not synced to Nutstore. Use the backup button below to export your configuration regularly.",
+			"backupName": "Backup local configuration",
+			"backupDesc": "Export plugin settings and local settings to a JSON file under .agents/nutstore-sync/backups/.",
+			"backupButton": "Backup config",
+			"backupDone": "Configuration backed up to: {{filePath}}",
+			"backupFailed": "Failed to back up configuration. See logs for details.",
+			"restoreName": "Restore latest backup",
+			"restoreDesc": "Read the newest configuration backup in backups/ and overwrite current settings. Keep your own copy first.",
+			"restoreButton": "Restore config",
+			"restored": "Restored from backup: {{filePath}}",
+			"restoreFailed": "Failed to restore configuration: {{message}}",
+			"restoreNoBackup": "No configuration backup is available"
 		},
 		"cache": {
 			"title": "Cache management",
@@ -454,6 +485,8 @@
 		"readonly": "This agent is read-only and cannot modify files. Attempted: {{summary}}",
 		"source": "Source",
 		"destination": "Destination",
+		"batchFiles": "{{count}} files will be affected:",
+		"andMore": "and {{count}} more",
 		"operations": {
 			"read": "read",
 			"write": "write",
@@ -504,6 +537,9 @@
 				"language": {
 					"name": "Language",
 					"auto": "auto"
+				},
+				"aiModelLimits": {
+					"name": "Model context/output limits"
 				}
 			}
 		}
@@ -720,7 +756,8 @@
 				"create": "Added",
 				"update": "Modified",
 				"delete": "Deleted",
-				"binary": "Binary file; text diff is unavailable"
+				"binary": "Binary file; text diff is unavailable",
+				"snapshotMissing": "Snapshot was not retained; undo is unavailable"
 			},
 			"states": {
 				"loading": "Restoring chat…",
@@ -746,7 +783,7 @@
 				"todoEmpty": "No todos"
 			},
 			"placeholders": {
-				"input": "Type a message. Enter to send, Shift+Enter for newline"
+				"input": "Type a message. Tap send"
 			},
 			"dialogs": {
 				"subagentTimeline": {

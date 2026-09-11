@@ -57,6 +57,37 @@ export default class AIPermissionModal extends Modal {
 		})
 	}
 
+	private renderBatchPathRequest() {
+		if (this.request.type !== 'fs' || !('paths' in this.request.fs)) {
+			return
+		}
+		const rowEl = this.contentEl.createDiv({ cls: ':uno: mb-2' })
+		rowEl.createEl('strong', {
+			text: getOperationLabel(this.request.fs.kind),
+		})
+		rowEl.createEl('p', {
+			cls: ':uno: mt-1',
+			text: i18n.t('aiPermission.batchFiles', {
+				count: this.request.fs.paths.length,
+			}),
+		})
+		const visible = this.request.fs.paths.slice(0, 10)
+		for (const path of visible) {
+			rowEl.createEl('code', {
+				cls: ':uno: block break-all',
+				text: path,
+			})
+		}
+		if (this.request.fs.paths.length > visible.length) {
+			rowEl.createEl('p', {
+				cls: ':uno: mt-1',
+				text: i18n.t('aiPermission.andMore', {
+					count: this.request.fs.paths.length - visible.length,
+				}),
+			})
+		}
+	}
+
 	private renderDualPathRequest() {
 		if (
 			this.request.type !== 'fs' ||
@@ -150,6 +181,8 @@ export default class AIPermissionModal extends Modal {
 
 		if (this.request.type === 'settings') {
 			this.renderSettingsRequest()
+		} else if ('paths' in this.request.fs) {
+			this.renderBatchPathRequest()
 		} else if (
 			this.request.fs.kind === 'copy' ||
 			this.request.fs.kind === 'move'
@@ -158,7 +191,6 @@ export default class AIPermissionModal extends Modal {
 		} else {
 			this.renderSinglePathRequest()
 		}
-
 		new Setting(contentEl)
 			.addButton((button) => {
 				button.buttonEl.addClass('mod-warning')

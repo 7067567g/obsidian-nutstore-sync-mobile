@@ -14,6 +14,7 @@ import type { SessionStore } from '~/ai/chat/session/session-store'
 import type { AppUIMessage, ChatAgentState } from '~/ai/chat/types'
 import type { AIModelConfig, AIProviderConfig } from '~/ai/core/types'
 import { createAbortError } from '~/ai/transport/abort'
+import logger from '~/utils/logger'
 
 export { createContextCompactionRevision } from '~/ai/chat/runtime/context-compaction-revision'
 
@@ -224,8 +225,11 @@ export class ContextCompactionCoordinator {
 			})
 			if (!this.isCurrent(request)) return { status: 'stale' }
 			return summary ? { status: 'ready', plan, summary } : { status: 'failed' }
-		} catch {
+		} catch (error) {
 			if (request.isCancelled()) return { status: 'cancelled' }
+			if (!controller.signal.aborted) {
+				logger.error('Context compaction failed', error)
+			}
 			return { status: controller.signal.aborted ? 'stale' : 'failed' }
 		}
 	}

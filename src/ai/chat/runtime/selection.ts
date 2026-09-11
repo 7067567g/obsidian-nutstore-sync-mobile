@@ -18,7 +18,7 @@ export class Selection {
 		private getSettings: () => NutstoreSettings['ai'],
 		private state: ChatState,
 		private notify: () => void,
-		private persistSession: (session: ChatSession) => Promise<void>,
+		private persistSession: (session: ChatSession) => void | Promise<void>,
 	) {}
 
 	getLoadedActiveSession() {

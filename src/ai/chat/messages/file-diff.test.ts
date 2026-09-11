@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { buildLineDiff } from './file-diff'
+import { buildFileDiff, buildLineDiff } from './file-diff'
+import { createSkippedFileSnapshot } from './reversible-content'
 
 function numberedLines(count: number) {
 	return Array.from({ length: count }, (_, index) => `line ${index + 1}`)
@@ -187,5 +188,21 @@ describe('buildLineDiff', () => {
 			{ kind: 'add', newLine: 1, text: 'alpha' },
 			{ kind: 'add', newLine: 2, text: 'beta' },
 		])
+	})
+})
+
+describe('buildFileDiff skipped snapshots', () => {
+	it('reports a skipped snapshot as a binary/unknown diff', async () => {
+		const diff = await buildFileDiff({
+			vaultPath: 'note.md',
+			operation: 'update',
+			before: createSkippedFileSnapshot(10_000_000, 'too-large'),
+			after: createSkippedFileSnapshot(10_000_000, 'too-large'),
+		})
+		expect(diff).toEqual({
+			vaultPath: 'note.md',
+			operation: 'update',
+			binary: true,
+		})
 	})
 })

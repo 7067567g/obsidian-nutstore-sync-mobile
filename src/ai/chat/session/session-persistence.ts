@@ -81,15 +81,17 @@ export type PersistedChatSession = PersistedValue<
 
 function arrayBufferToBase64Url(buffer: ArrayBuffer): string {
 	const bytes = new Uint8Array(buffer)
-	const chunkSize = 0x8000
+	// Keep the spread call below the argument limit on older Android WebViews.
+	const chunkSize = 0x2000
 	let binary = ''
 	for (let i = 0; i < bytes.length; i += chunkSize) {
 		binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize))
 	}
-	return btoa(binary)
-		.replace(/\+/g, '-')
-		.replace(/\//g, '_')
-		.replace(/=+$/g, '')
+	// One pass instead of three full-string replaces. Padding only ever appears
+	// at the end, so dropping every '=' is equivalent to /(=+)$/.
+	return btoa(binary).replace(/[+/=]/g, (char) =>
+		char === '+' ? '-' : char === '/' ? '_' : '',
+	)
 }
 
 function base64UrlToArrayBuffer(value: string): ArrayBuffer {
@@ -173,13 +175,48 @@ function isPersistedUrlRecord(value: unknown): value is PersistedUrlRecord {
 	)
 }
 
-async function encodeBlobs(value: unknown): Promise<unknown> {
-	if (value instanceof Blob) {
+// Cache the in-flight promise, not the resolved record: encodeBlobs encodes
+// object entries concurrently, so two references to one Blob would otherwise
+// both read and base64-encode it before either could populate the cache.
+const encodedBlobCache = new WeakMap<Blob, Promise<PersistedBlobRecord>>()
+const encodedArrayBufferCache = new WeakMap<
+	ArrayBuffer,
+	PersistedBinaryRecord
+>()
+const encodedUint8ArrayCache = new WeakMap<Uint8Array, PersistedBinaryRecord>()
+
+function encodeBinary(value: ArrayBuffer | Uint8Array): PersistedBinaryRecord {
+	const cache =
+		value instanceof ArrayBuffer
+			? encodedArrayBufferCache
+			: encodedUint8ArrayCache
+	const cached = cache.get(value as never)
+	if (cached) return cached
+	const record = createBinaryRecord(value)
+	cache.set(value as never, record)
+	return record
+}
+
+function encodeBlob(value: Blob): Promise<PersistedBlobRecord> {
+	const cached = encodedBlobCache.get(value)
+	if (cached) return cached
+	const promise = (async (): Promise<PersistedBlobRecord> => {
 		return {
 			[BLOB_RECORD_MARKER_V2]: true,
 			type: value.type,
 			data: arrayBufferToBase64Url(await value.arrayBuffer()),
-		} satisfies PersistedBlobRecord
+		}
+	})().catch((error: unknown) => {
+		encodedBlobCache.delete(value)
+		throw error
+	})
+	encodedBlobCache.set(value, promise)
+	return promise
+}
+
+async function encodeBlobs(value: unknown): Promise<unknown> {
+	if (value instanceof Blob) {
+		return encodeBlob(value)
 	}
 	if (value instanceof URL) {
 		return {
@@ -188,7 +225,7 @@ async function encodeBlobs(value: unknown): Promise<unknown> {
 		} satisfies PersistedUrlRecord
 	}
 	if (value instanceof ArrayBuffer || value instanceof Uint8Array) {
-		return createBinaryRecord(value)
+		return encodeBinary(value)
 	}
 	if (ArrayBuffer.isView(value)) {
 		throw new TypeError(

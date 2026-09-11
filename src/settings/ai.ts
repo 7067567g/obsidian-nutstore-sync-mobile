@@ -8,6 +8,7 @@ import {
 	sanitizeDefaultSelections,
 	sanitizeProviders,
 } from '~/ai/catalog/config'
+import { DEFAULT_MAX_INLINE_OPERATION_BYTES } from '~/ai/chat/session/session-operations'
 import ProvidersManagerModal from '~/components/ProvidersManagerModal'
 import McpServersManagerModal from '~/components/McpServersManagerModal'
 import i18n from '~/i18n'
@@ -140,6 +141,43 @@ export default class AISettings extends BaseSettings {
 						await this.persist(false)
 					}),
 			)
+
+		new Setting(this.containerEl)
+			.setName(i18n.t('settings.ai.sessionStorage.name'))
+			.setDesc(i18n.t('settings.ai.sessionStorage.desc'))
+			.addText((text) => {
+				text.inputEl.type = 'number'
+				text.inputEl.min = '0'
+				text.inputEl.step = '64'
+				text.setValue(
+					String(
+						Math.round(
+							(this.plugin.settings.ai.maxInlineOperationBytes ??
+								DEFAULT_MAX_INLINE_OPERATION_BYTES) / 1024,
+						),
+					),
+				)
+				text.onChange(async (value) => {
+					const kilobytes = Number.parseInt(value, 10)
+					this.plugin.settings.ai.maxInlineOperationBytes =
+						Number.isFinite(kilobytes) && kilobytes > 0
+							? kilobytes * 1024
+							: undefined
+					await this.persist(false)
+				})
+			})
+		new Setting(this.containerEl)
+			.setName(i18n.t('settings.ai.windowedRendering.name'))
+			.setDesc(i18n.t('settings.ai.windowedRendering.desc'))
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.ai.windowedRendering !== false)
+					.onChange(async (value) => {
+						this.plugin.settings.ai.windowedRendering = value
+						await this.persist(false)
+					}),
+			)
+
 		this.containerEl.createEl('h3', {
 			text: i18n.t('settings.ai.subagents.heading'),
 		})

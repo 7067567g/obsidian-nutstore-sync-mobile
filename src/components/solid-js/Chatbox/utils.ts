@@ -27,27 +27,6 @@ export function formatTime(timestamp: number) {
 	return formatTimeFallback(timestamp)
 }
 
-interface ChatInputKeyEvent {
-	key: string
-	shiftKey: boolean
-	isComposing: boolean
-	/** Legacy WebKit/IME composition sentinel. */
-	keyCode: number
-}
-
-export function shouldSubmitChatInput(
-	event: ChatInputKeyEvent,
-	compositionActive: boolean,
-) {
-	return (
-		event.key === 'Enter' &&
-		!event.shiftKey &&
-		!compositionActive &&
-		!event.isComposing &&
-		event.keyCode !== 229
-	)
-}
-
 export function formatUsage(input?: number, output?: number, total?: number) {
 	if (
 		typeof input !== 'number' &&

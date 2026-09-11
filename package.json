@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-nutstore-sync",
-	"version": "1.5.0",
+	"version": "1.5.1",
 	"main": "main.js",
 	"type": "module",
 	"scripts": {
@@ -16,7 +16,8 @@
 		"test:models-api": "jiti scripts/update-models-api.ts --check",
 		"test:obsidian": "node scripts/run-obsidian-integration.mjs",
 		"update:models-api": "jiti scripts/update-models-api.ts",
-		"postinstall": "lefthook install"
+		"postinstall": "lefthook install",
+		"release:local": "node scripts/release-local.mjs"
 	},
 	"dependencies": {
 		"@ai-sdk/anthropic": "^4.0.23",

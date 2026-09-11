@@ -11,22 +11,30 @@ export interface LogEntry {
 	args: unknown[]
 }
 
+const MAX_IN_MEMORY_LOGS = 5000
+
 export default class LoggerService extends BaseService {
 	logs: LogEntry[] = []
 
-	constructor(plugin: NutstorePlugin) {
+	constructor(private readonly plugin: NutstorePlugin) {
 		super()
-		void plugin
 	}
 
 	override onload() {
 		const reporter: ConsolaReporter = {
 			log: (logObj: LogObject) => {
-				this.logs.push({
+				const entry: LogEntry = {
 					timestamp: moment(logObj.date).format('YYYY-MM-DD HH:mm:ss'),
 					level: logObj.type,
 					args: logObj.args,
-				})
+				}
+				this.logs.push(entry)
+				if (this.logs.length > MAX_IN_MEMORY_LOGS) {
+					this.logs.splice(0, this.logs.length - MAX_IN_MEMORY_LOGS)
+				}
+				void this.plugin.diagnosticsLogFile
+					?.append(entry.level, entry.args, entry.timestamp)
+					.catch(() => undefined)
 			},
 		}
 		if (IN_DEV) {
@@ -39,5 +47,6 @@ export default class LoggerService extends BaseService {
 
 	clear() {
 		this.logs = []
+		void this.plugin.diagnosticsLogFile?.clear()
 	}
 }

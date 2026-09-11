@@ -273,4 +273,24 @@ describe('createFullAccessPermissionGuard', () => {
 
 		expect(modalOpenMock).not.toHaveBeenCalled()
 	})
+
+	it('batch write request prompts once and auto-approves by operation kind', async () => {
+		const { guard } = createGuard('session-1')
+		modalOpenMock.mockResolvedValueOnce('auto-approve-operation')
+
+		await guard({
+			type: 'fs',
+			fs: { kind: 'write', paths: ['notes/a.md', 'notes/b.md'] },
+		})
+		await guard({ type: 'fs', fs: { kind: 'write', path: 'notes/c.md' } })
+
+		expect(modalOpenMock).toHaveBeenCalledTimes(1)
+		expect(modalCtorMock).toHaveBeenCalledWith({
+			app: {},
+			request: {
+				type: 'fs',
+				fs: { kind: 'write', paths: ['notes/a.md', 'notes/b.md'] },
+			},
+		})
+	})
 })

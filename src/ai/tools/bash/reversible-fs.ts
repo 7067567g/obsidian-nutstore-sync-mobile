@@ -7,13 +7,41 @@ import type {
 	MkdirOptions,
 	RmOptions,
 } from 'just-bash/browser'
-import type { ReversibleFileSnapshot } from '~/ai/chat/types'
-import { createCompressedFileContent } from '~/ai/chat/messages/reversible-content'
+import type {
+	ReversibleDirSnapshot,
+	ReversibleFileSnapshot,
+} from '~/ai/chat/types'
+import {
+	createCompressedFileContent,
+	createSkippedFileSnapshot,
+} from '~/ai/chat/messages/reversible-content'
 import type { ReversibleOpRecorder } from './fs'
 
-type Snapshot = ReversibleFileSnapshot | { kind: 'dir' }
+type Snapshot = ReversibleFileSnapshot | ReversibleDirSnapshot
 type ReadOptions = Parameters<IFileSystem['readFile']>[1]
 type WriteOptions = Parameters<IFileSystem['writeFile']>[2]
+
+/**
+ * Mobile-safe snapshot budgets. Reversible snapshots run on the single JS
+ * thread, so a huge file or directory must not trigger unbounded synchronous
+ * deflate work. Contents above the byte/entry budget are recorded as skipped
+ * ({ path, size, reason }) instead; undo/diff for those operations is
+ * unavailable, but the UI stays responsive.
+ */
+export const MAX_REVERSIBLE_SNAPSHOT_BYTES = 1024 * 1024
+export const MAX_REVERSIBLE_SNAPSHOT_ENTRIES = 512
+
+interface SnapshotBudget {
+	remainingBytes: number
+	remainingEntries: number
+}
+
+function createSnapshotBudget(): SnapshotBudget {
+	return {
+		remainingBytes: MAX_REVERSIBLE_SNAPSHOT_BYTES,
+		remainingEntries: MAX_REVERSIBLE_SNAPSHOT_ENTRIES,
+	}
+}
 
 export interface ReversibleFsOptions {
 	/**
@@ -56,23 +84,62 @@ export class ReversibleFs implements IFileSystem {
 		return normalized.slice(1)
 	}
 
-	private async snapshot(path: string, result = new Map<string, Snapshot>()) {
+	private async snapshot(
+		path: string,
+		result = new Map<string, Snapshot>(),
+		budget = createSnapshotBudget(),
+	) {
 		const normalized = normalizePath(path)
 		if (!(await this.inner.exists(normalized))) return result
 		const stat = await this.inner.stat(normalized)
 		if (stat.isDirectory) {
-			result.set(normalized, { kind: 'dir' })
-			for (const child of await this.inner.readdir(normalized)) {
-				await this.snapshot(joinPath(normalized, child), result)
+			const directory: ReversibleDirSnapshot = { kind: 'dir' }
+			result.set(normalized, directory)
+			if (budget.remainingEntries <= 0) {
+				directory.skipped = { entries: 0, reason: 'entry-budget' }
+				return result
 			}
-		} else {
-			result.set(normalized, {
-				kind: 'file',
-				contentCompressed: createCompressedFileContent(
-					await this.inner.readFileBuffer(normalized),
-				),
-			})
+			budget.remainingEntries -= 1
+			const children = await this.inner.readdir(normalized)
+			let visited = 0
+			for (const child of children) {
+				if (budget.remainingEntries <= 0) {
+					directory.skipped = {
+						entries: children.length - visited,
+						reason: 'entry-budget',
+					}
+					break
+				}
+				await this.snapshot(joinPath(normalized, child), result, budget)
+				visited += 1
+			}
+			return result
 		}
+
+		if (budget.remainingEntries <= 0) {
+			result.set(normalized, createSkippedFileSnapshot(stat.size, 'entries'))
+			return result
+		}
+		budget.remainingEntries -= 1
+		if (
+			stat.size > MAX_REVERSIBLE_SNAPSHOT_BYTES ||
+			stat.size > budget.remainingBytes
+		) {
+			result.set(
+				normalized,
+				createSkippedFileSnapshot(
+					stat.size,
+					stat.size > MAX_REVERSIBLE_SNAPSHOT_BYTES ? 'too-large' : 'budget',
+				),
+			)
+			return result
+		}
+		const bytes = await this.inner.readFileBuffer(normalized)
+		budget.remainingBytes -= bytes.byteLength
+		result.set(normalized, {
+			kind: 'file',
+			contentCompressed: createCompressedFileContent(bytes),
+		})
 		return result
 	}
 
@@ -81,9 +148,11 @@ export class ReversibleFs implements IFileSystem {
 		this.depth++
 		try {
 			const before = new Map<string, Snapshot>()
+			const beforeBudget = createSnapshotBudget()
 			this.recorder.beginCapture()
 			try {
-				for (const path of paths) await this.snapshot(path, before)
+				for (const path of paths)
+					await this.snapshot(path, before, beforeBudget)
 			} finally {
 				this.recorder.endCapture()
 			}
@@ -97,9 +166,10 @@ export class ReversibleFs implements IFileSystem {
 				failure = error
 			}
 			const after = new Map<string, Snapshot>()
+			const afterBudget = createSnapshotBudget()
 			this.recorder.beginCapture()
 			try {
-				for (const path of paths) await this.snapshot(path, after)
+				for (const path of paths) await this.snapshot(path, after, afterBudget)
 			} finally {
 				this.recorder.endCapture()
 			}

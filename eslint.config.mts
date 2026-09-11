@@ -69,7 +69,13 @@ const markdownPlugin = markdown as unknown as NonNullable<
 
 export default defineConfig([
 	{
-		ignores: ['node_modules/**', 'dist/**', 'main.js', 'coverage/**'],
+		ignores: [
+			'node_modules/**',
+			'dist/**',
+			'release/**',
+			'main.js',
+			'coverage/**',
+		],
 	},
 
 	...obsidianRecommended,

@@ -13,6 +13,7 @@ import {
 	type ChatMetaFile,
 	type ChatSessionFilePayload,
 } from '~/ai/chat/session/session-files'
+import { perfMetrics, perfNow } from '~/diagnostics/perf-metrics'
 import i18n from '~/i18n'
 import {
 	decodeChatSessionFromStorage,
@@ -27,6 +28,8 @@ import type { ChatAgentState, ReversibleToolOp } from '~/ai/chat/types'
 import { normalizeReversibleToolOpRecord } from '~/ai/chat/messages/reversible-op-utils'
 import { MASTER_AGENT_ID } from '~/ai/chat/agents/registry'
 import { normalizeRehydratedExecution } from '~/ai/chat/session/rehydration-execution'
+import { SessionRecovery } from '~/ai/chat/session/session-recovery'
+import { SessionWriteQueue } from '~/ai/chat/session/session-write-queue'
 import logger from '~/utils/logger'
 
 /**
@@ -62,13 +65,14 @@ export class SessionUnavailableError extends Error {
 }
 
 export class SessionStore {
-	private persistQueues = new Map<string, Promise<void>>()
+	private writeQueues = new Map<string, SessionWriteQueue>()
 
 	constructor(
 		private state: ChatState,
 		private selection: Selection,
 		private backend: SessionsFileBackend,
 		private legacy: SessionLegacyStore,
+		private recovery: SessionRecovery | undefined,
 		private resetSessionExecution: (
 			sessionId: string,
 			session: ChatSession,
@@ -91,6 +95,18 @@ export class SessionStore {
 			return
 		}
 		await this.reconcileSessionIndex(legacyMigration, { diskIds, meta })
+	}
+
+	async collectOperationGcReport(options?: { deleteOrphans?: boolean }) {
+		return this.backend.collectOperationGcReport(options)
+	}
+
+	async recoverPendingWrites() {
+		if (!this.recovery) return
+		await this.recovery.recoverPending(async (id) => {
+			await this.backend.readSessionFile(id, { hydrateOperations: false })
+			this.state.deletedSessionIds.delete(id)
+		})
 	}
 
 	async loadInitialSession() {
@@ -177,7 +193,9 @@ export class SessionStore {
 		const validItems = new Map<string, ChatSessionIndexItem>()
 		for (const id of diskIds) {
 			try {
-				const payload = await this.backend.readSessionFile(id)
+				const payload = await this.backend.readSessionFile(id, {
+					hydrateOperations: false,
+				})
 				const stored = decodeChatSessionFromStorage(payload.session)
 				const { session } = this.rehydrateSession(stored)
 				const cached = meta?.sessions?.[id]
@@ -314,6 +332,35 @@ export class SessionStore {
 		return session
 	}
 
+	private getWriteQueue(sessionId: string) {
+		let queue = this.writeQueues.get(sessionId)
+		if (!queue) {
+			queue = new SessionWriteQueue(async (task) => {
+				if (this.state.deletedSessionIds.has(sessionId) || !task.isCurrent()) {
+					return
+				}
+				const encodeStartedAt = perfNow()
+				const snapshot = await encodeChatSessionForStorage(task.session)
+				perfMetrics.recordPersistenceEncode(perfNow() - encodeStartedAt)
+				if (this.state.deletedSessionIds.has(sessionId) || !task.isCurrent()) {
+					return
+				}
+				await this.recovery?.markStarted(sessionId)
+				await this.backend.writeSessionFile(
+					sessionId,
+					{
+						session: snapshot,
+						title: task.title,
+					},
+					task.session,
+				)
+				await this.recovery?.markCompleted(sessionId)
+			})
+			this.writeQueues.set(sessionId, queue)
+		}
+		return queue
+	}
+
 	async persistSession(
 		session: ChatSession,
 		isCurrent: () => boolean = () =>
@@ -322,31 +369,73 @@ export class SessionStore {
 		if (this.state.deletedSessionIds.has(session.id) || !isCurrent()) {
 			return
 		}
-		const sessionId = session.id
-		const previous = this.persistQueues.get(sessionId) ?? Promise.resolve()
-		const title = this.getIndexedTitle(session)
-		const write = previous
-			.catch(() => undefined)
-			.then(async () => {
-				if (this.state.deletedSessionIds.has(sessionId) || !isCurrent()) return
-				const snapshot = await encodeChatSessionForStorage(session)
-				if (this.state.deletedSessionIds.has(sessionId) || !isCurrent()) return
-				await this.backend.writeSessionFile(sessionId, {
-					session: snapshot,
-					title,
-				})
+		const startedAt = perfNow()
+		try {
+			const queue = this.getWriteQueue(session.id)
+			const promise = queue.schedule({
+				session,
+				title: this.getIndexedTitle(session),
+				isCurrent,
 			})
-		this.persistQueues.set(sessionId, write)
-		void write
-			.finally(() => {
-				if (this.persistQueues.get(sessionId) === write) {
-					this.persistQueues.delete(sessionId)
-				}
-			})
-			.catch((error) => {
+			void promise.catch((error) => {
 				logger.error('Failed to persist chat session', error)
 			})
-		await write
+			// Awaited persists are durability points, so flush immediately. This also
+			// drains any fire-and-forget batch already queued for this session.
+			await queue.flush()
+		} finally {
+			perfMetrics.recordPersistence(perfNow() - startedAt)
+		}
+	}
+
+	/**
+	 * Queue a write-behind persist for callers that do not await persistence
+	 * (selection changes, queued-message bookkeeping). The fixed window coalesces
+	 * bursts into one write; `flushSession`/`flushAll` are the durability barriers.
+	 */
+	persistSessionSoon(
+		session: ChatSession,
+		isCurrent: () => boolean = () =>
+			this.state.loadedSessions.get(session.id) === session,
+	) {
+		if (this.state.deletedSessionIds.has(session.id) || !isCurrent()) {
+			return
+		}
+		const promise = this.getWriteQueue(session.id).schedule({
+			session,
+			title: this.getIndexedTitle(session),
+			isCurrent,
+		})
+		void promise.catch((error) => {
+			logger.error('Failed to persist chat session', error)
+		})
+	}
+
+	/** Force one session's pending write-behind batch to disk. */
+	async flushSession(sessionId: string) {
+		const queue = this.writeQueues.get(sessionId)
+		if (!queue) return
+		const startedAt = perfNow()
+		try {
+			await queue.flush()
+		} finally {
+			perfMetrics.recordPersistence(perfNow() - startedAt)
+		}
+	}
+
+	/** Flush every session's pending write-behind batch, aggregating failures. */
+	async flushAll() {
+		const results = await Promise.allSettled(
+			[...this.writeQueues.keys()].map((sessionId) =>
+				this.flushSession(sessionId),
+			),
+		)
+		const errors: unknown[] = results.flatMap((result) =>
+			result.status === 'rejected' ? [result.reason as unknown] : [],
+		)
+		if (errors.length > 0) {
+			throw new AggregateError(errors, 'Failed to flush chat sessions')
+		}
 	}
 
 	async persistMetaAndIndex() {
@@ -367,9 +456,19 @@ export class SessionStore {
 	}
 
 	async deleteSession(sessionId: string) {
+		const queue = this.writeQueues.get(sessionId)
+		if (queue) {
+			await queue.flush().catch((error) => {
+				logger.error('Failed to flush chat session before delete', error)
+			})
+		}
 		this.state.deletedSessionIds.add(sessionId)
-		await this.persistQueues.get(sessionId)?.catch(() => undefined)
+		if (queue) {
+			await queue.dispose()
+			this.writeQueues.delete(sessionId)
+		}
 		await this.backend.deleteSessionFile(sessionId)
+		await this.recovery?.markCompleted(sessionId)
 		try {
 			await this.legacy.unsetSession(sessionId)
 		} catch {

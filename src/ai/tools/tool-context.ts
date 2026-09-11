@@ -26,6 +26,7 @@ export const recordMetadataDep = z.optional(z.custom<RecordMetadataFn>())
 export const viewImageAttachmentsDep = z.optional(
 	z.custom<ViewImageAttachmentRegistry>(),
 )
+export const supportsImageInputDep = z.optional(z.custom<boolean>())
 export const getSettingsSnapshotDep = z.optional(z.custom<SettingsSnapshotFn>())
 export const updateSettingsDep = z.optional(z.custom<SettingsUpdater>())
 export const fileSystemManagerDep = z.optional(

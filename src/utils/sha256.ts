@@ -1,7 +1,12 @@
 import { fromUint8Array } from 'js-base64'
+import { sha256Fallback } from './sha256-fallback'
 
 export async function sha256(data: BufferSource) {
-	return crypto.subtle.digest('SHA-256', data)
+	const subtle = typeof crypto === 'undefined' ? undefined : crypto.subtle
+	if (typeof subtle?.digest === 'function') {
+		return subtle.digest('SHA-256', data)
+	}
+	return sha256Fallback(data)
 }
 
 export async function sha256Hex(data: BufferSource) {

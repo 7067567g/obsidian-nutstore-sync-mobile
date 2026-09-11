@@ -1,11 +1,10 @@
 import { parse as bytesParse } from 'bytes-iec'
 import { hasInvalidChar } from '~/utils/has-invalid-char'
-import { isSameTime } from '~/utils/is-same-time'
 import remotePathToAbsolute from '~/utils/remote-path-to-absolute'
 import { remotePathToLocalPath } from '~/utils/remote-path-to-local-path'
 import { hasFolderContentChanged } from '../core/has-folder-content-changed'
 import { areLooseEqualFiles } from '../core/loose-equality'
-import { getFileChanges } from '../core/file-changes'
+import { getFileChanges, getRemoteFileChanged } from '../core/file-changes'
 import { shouldCreateCleanRecordTask } from '../core/record-cleanup'
 import { SkipReason } from '../tasks/skipped.task'
 import { BaseTask } from '../tasks/task.interface'
@@ -235,7 +234,7 @@ export async function sendOnlyDecider(
 				})
 				continue
 			}
-			const remoteChanged = !isSameTime(remote.mtime, record.remote.mtime)
+			const remoteChanged = getRemoteFileChanged(remote, record.remote)
 			if (!remoteChanged) {
 				logger.debug({
 					reason: 'local deleted, remote unchanged — remove remote',

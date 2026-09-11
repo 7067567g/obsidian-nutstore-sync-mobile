@@ -9,6 +9,11 @@ import {
 	uiMessagesToModelMessages,
 } from '~/ai/chat/messages/ui-message'
 import { buildAgentSystemPrompt, COMPRESSION_PROMPT } from '~/ai/chat/prompts'
+import {
+	estimateTextTokens,
+	estimateTimelineTokens,
+} from '~/ai/chat/runtime/token-estimator'
+import { pruneToolResultsForSummary } from '~/ai/chat/runtime/tool-result-pruner'
 import type { ToolExecutor } from '~/ai/chat/runtime/tool-executor'
 import type { SessionStore } from '~/ai/chat/session/session-store'
 import type { AppUIMessage, ChatAgentState } from '~/ai/chat/types'
@@ -31,7 +36,6 @@ const RECENT_TURNS_CONTEXT_RATIO = 0.05
 const MIN_RECENT_TURNS_TOKEN_BUDGET = 2048
 const MAX_RECENT_TURNS_TOKEN_BUDGET = 4096 * 4
 const MAX_RECENT_TURNS = 8
-const ESTIMATED_UTF8_BYTES_PER_TOKEN = 3
 
 export type SummaryToolSet = ToolSet
 
@@ -114,11 +118,23 @@ interface CompressContextRunnerOptions extends Omit<
 	messageFactory: MessageFactory
 }
 
+/**
+ * Resolve the effective context window.
+ *
+ * `limit.context` is authoritative when the provider metadata supplies it.
+ * Some OpenAI-compatible endpoints only publish an input limit (or report a
+ * zero context), so fall back to `limit.input` before the conservative default
+ * rather than silently compressing a large-window model at 256K. Users can
+ * always override `limit.context` in the model editor.
+ */
 export function resolveContextWindow(model?: AIModelConfig) {
 	const configuredLimit = model?.limit?.context
-	return configuredLimit && configuredLimit > 0
-		? configuredLimit
-		: FALLBACK_CONTEXT_WINDOW
+	if (configuredLimit && configuredLimit > 0) return configuredLimit
+	const configuredInputLimit = model?.limit?.input
+	if (configuredInputLimit && configuredInputLimit > 0) {
+		return configuredInputLimit
+	}
+	return FALLBACK_CONTEXT_WINDOW
 }
 
 function resolveModelInputLimit(model: AIModelConfig | undefined) {
@@ -154,14 +170,62 @@ function isContextCheckpoint(message: AppUIMessage) {
 	return message.parts.some((part) => part.type === 'data-context-checkpoint')
 }
 
-function estimateSerializedTokens(value: unknown) {
-	const bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength
-	return Math.ceil(bytes / ESTIMATED_UTF8_BYTES_PER_TOKEN)
+function isIncompleteToolCall(part: AppUIMessage['parts'][number]) {
+	return (
+		part.type === 'dynamic-tool' &&
+		part.state !== 'output-available' &&
+		part.state !== 'output-error' &&
+		part.state !== 'output-denied'
+	)
+}
+
+function findFirstIncompleteToolCallIndex(
+	messages: readonly AppUIMessage[],
+	end: number,
+) {
+	for (let index = 0; index < end; index += 1) {
+		if (messages[index]?.parts.some(isIncompleteToolCall)) return index
+	}
+	return -1
+}
+
+function findPreviousUserTurnStart(
+	messages: readonly AppUIMessage[],
+	index: number,
+) {
+	for (let current = index; current >= 0; current -= 1) {
+		const message = messages[current]
+		if (message?.role === 'user' && !isContextCheckpoint(message)) {
+			return current
+		}
+	}
+	return 0
+}
+
+/**
+ * Move a proposed cut earlier until every summarized message is tool-pairing
+ * balanced: an incomplete tool call must be retained, not replayed to the
+ * summarizer without its result. Borrowed from the Harness compaction
+ * `tool-pairing` invariant; returns 0 when no safe prefix exists.
+ */
+export function findToolPairingSafeCut(
+	messages: readonly AppUIMessage[],
+	cut: number,
+) {
+	let next = cut
+	while (next > 0) {
+		const openIndex = findFirstIncompleteToolCallIndex(messages, next)
+		if (openIndex === -1) return next
+		const turnStart = findPreviousUserTurnStart(messages, openIndex)
+		if (turnStart >= next) return 0
+		next = turnStart
+	}
+	return next
 }
 
 /** Stable local estimate used only to verify that compaction made progress. */
 export function estimateContextTokens(agent: ChatAgentState) {
-	return estimateSerializedTokens(selectContextTimeline(agent.timeline))
+	return estimateTimelineTokens(selectContextTimeline(agent.timeline))
 }
 
 export async function findRecentTurnStartIndex(
@@ -186,10 +250,7 @@ export async function findRecentTurnStartIndex(
 	for (let turn = turnStarts.length - 1; turn >= 0; turn -= 1) {
 		const start = turnStarts[turn]
 		const end = turnStarts[turn + 1] ?? messages.length
-		const modelMessages = await uiMessagesToModelMessages(
-			messages.slice(start, end),
-		)
-		const turnTokens = estimateSerializedTokens(modelMessages)
+		const turnTokens = estimateTimelineTokens(messages.slice(start, end))
 		if (
 			preservedTurns > 0 &&
 			(preservedTurns >= MAX_RECENT_TURNS ||
@@ -280,12 +341,16 @@ export async function createContextCompressionPlan(
 		contextTimeline,
 		resolveRecentTurnsTokenBudget(resolveContextWindow(model)),
 	)
-	const summaryEndIndex =
+	const proposedCut =
 		preservedTurnIndex > 0
 			? preservedTurnIndex
 			: options.allowFullContext
 				? contextTimeline.length
 				: 0
+	const summaryEndIndex =
+		proposedCut > 0
+			? findToolPairingSafeCut(contextTimeline, proposedCut)
+			: proposedCut
 	if (summaryEndIndex === 0) return undefined
 
 	const messages = contextTimeline.slice(0, summaryEndIndex)
@@ -339,10 +404,14 @@ export async function generateContextCompression(
 		options.provider,
 		options.model.id,
 	)
+	// Summary-only pruning: huge historical tool outputs are replayed for the
+	// summarizer but are pure cost there. The live timeline and persisted session
+	// keep the original outputs (diff/undo unaffected).
+	const summaryMessages = pruneToolResultsForSummary(options.plan.messages)
 	const messageSequence =
 		options.buildMessages && tools
-			? await options.buildMessages(options.plan.messages, tools)
-			: await uiMessagesToModelMessages(options.plan.messages, tools)
+			? await options.buildMessages(summaryMessages, tools)
+			: await uiMessagesToModelMessages(summaryMessages, tools)
 	const preparedMessages = prepareMessagesForModel(
 		options.provider,
 		options.model.id,
@@ -366,7 +435,16 @@ export async function generateContextCompression(
 	})
 	if (options.isCancelled?.()) return undefined
 	const summary = response.text.trim()
-	return summary || undefined
+	if (!summary) return undefined
+	// Borrowed from DeepSeek Harness compaction: a replacement that is not
+	// smaller than the range it shadows would increase pressure, so reject it
+	// instead of committing a non-shrinking checkpoint.
+	if (
+		estimateTextTokens(summary) >= estimateTimelineTokens(options.plan.messages)
+	) {
+		return undefined
+	}
+	return summary
 }
 
 export function isContextCompressionPlanCurrent(

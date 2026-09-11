@@ -29,13 +29,15 @@ const taskOutputSchema = z.object({
 export type DispatchTaskResult = z.infer<typeof taskOutputSchema>
 
 export const taskTool = tool({
+	// The AI SDK omits toolsContext for schema-only calls (e.g. context
+	// compression), so this description must tolerate an absent context.
 	description: ({
 		context,
 	}: {
-		context: { dispatchableDefinitions?: readonly AgentDefinition[] }
-	}) => {
+		context?: { dispatchableDefinitions?: readonly AgentDefinition[] }
+	} = {}) => {
 		const availableTypes = (
-			context.dispatchableDefinitions ?? listDispatchableDefinitions()
+			context?.dispatchableDefinitions ?? listDispatchableDefinitions()
 		)
 			.map((definition) => `${definition.id}: ${definition.description}`)
 			.join('; ')

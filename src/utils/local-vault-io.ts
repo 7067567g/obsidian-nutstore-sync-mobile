@@ -1,4 +1,5 @@
 import { normalizePath, TFile, Vault } from 'obsidian'
+import { ensureParentDirectory } from './adapter-io'
 
 function isAdapterPathNormalized(vault: Vault, normalizedPath: string) {
 	const pathForCheck = normalizedPath.replace(/^\/+/, '').replace(/\/+$/, '')
@@ -50,6 +51,7 @@ export async function writeLocalBinary(
 ) {
 	const normalizedPath = normalizePath(path)
 	if (isAdapterPathNormalized(vault, normalizedPath)) {
+		await ensureParentDirectory(vault.adapter, normalizedPath)
 		await vault.adapter.writeBinary(normalizedPath, data)
 		return
 	}
@@ -68,6 +70,7 @@ export async function writeLocalBinary(
 export async function writeLocalText(vault: Vault, path: string, data: string) {
 	const normalizedPath = normalizePath(path)
 	if (isAdapterPathNormalized(vault, normalizedPath)) {
+		await ensureParentDirectory(vault.adapter, normalizedPath)
 		await vault.adapter.write(normalizedPath, data)
 		return
 	}

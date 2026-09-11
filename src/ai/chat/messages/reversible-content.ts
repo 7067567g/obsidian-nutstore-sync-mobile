@@ -3,6 +3,7 @@ import { toUint8Array } from 'js-base64'
 import type {
 	ReversibleCompressedContent,
 	ReversibleFileSnapshot,
+	ReversibleSkippedSnapshot,
 } from '~/ai/chat/types'
 
 function toArrayBuffer(content: Uint8Array) {
@@ -30,6 +31,24 @@ export function createCompressedFileContent(
 	}
 }
 
+export function createSkippedFileSnapshot(
+	size: number,
+	reason: ReversibleSkippedSnapshot['reason'],
+): ReversibleFileSnapshot {
+	return {
+		kind: 'file',
+		skipped: { size, reason },
+	}
+}
+
+export function isSkippedFileSnapshot(
+	content: ReversibleFileSnapshot,
+): content is ReversibleFileSnapshot & {
+	skipped: ReversibleSkippedSnapshot
+} {
+	return content.skipped !== undefined
+}
+
 export function hasCompressedFileContent(
 	content: ReversibleFileSnapshot,
 ): content is ReversibleFileSnapshot & {
@@ -44,6 +63,11 @@ export function hasCompressedFileContent(
 export async function decodeReversibleFileSnapshot(
 	content: ReversibleFileSnapshot,
 ) {
+	if (isSkippedFileSnapshot(content)) {
+		throw new Error(
+			`Reversible snapshot content was not retained (${content.skipped.size} bytes, ${content.skipped.reason})`,
+		)
+	}
 	if (hasCompressedFileContent(content)) {
 		const compressed = await content.contentCompressed.blob.arrayBuffer()
 		const inflated = inflate(new Uint8Array(compressed))

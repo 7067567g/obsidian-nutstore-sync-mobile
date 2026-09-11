@@ -12,6 +12,18 @@ function copyFileSnapshot(
 			? { ...snapshot.contentCompressed }
 			: undefined,
 		contentBase64: snapshot.contentBase64,
+		skipped: snapshot.skipped ? { ...snapshot.skipped } : undefined,
+	}
+}
+
+function copyDirSnapshot(
+	snapshot: Extract<ReversibleToolOp, { operation: 'delete' }>['before'] & {
+		kind: 'dir'
+	},
+) {
+	return {
+		kind: 'dir' as const,
+		skipped: snapshot.skipped ? { ...snapshot.skipped } : undefined,
 	}
 }
 
@@ -21,12 +33,15 @@ export function copyReversibleToolOp(op: ReversibleToolOp): ReversibleToolOp {
 			return {
 				vaultPath: op.vaultPath,
 				operation: 'create',
-				before: { kind: op.before.kind },
+				before:
+					op.before.kind === 'dir'
+						? copyDirSnapshot(op.before)
+						: { kind: 'file' as const },
 				after:
 					op.after?.kind === 'file'
 						? copyFileSnapshot(op.after)
 						: op.after
-							? { kind: 'dir' as const }
+							? copyDirSnapshot(op.after)
 							: undefined,
 				toolCallId: op.toolCallId,
 			}
@@ -44,14 +59,8 @@ export function copyReversibleToolOp(op: ReversibleToolOp): ReversibleToolOp {
 				operation: 'delete',
 				before:
 					op.before.kind === 'dir'
-						? { kind: 'dir' }
-						: {
-								kind: 'file',
-								contentCompressed: op.before.contentCompressed
-									? { ...op.before.contentCompressed }
-									: undefined,
-								contentBase64: op.before.contentBase64,
-							},
+						? copyDirSnapshot(op.before)
+						: copyFileSnapshot(op.before),
 				toolCallId: op.toolCallId,
 			}
 	}
@@ -100,6 +109,7 @@ export function normalizeReversibleToolOpRecord(op: ReversibleToolOp) {
 	}
 	if (op.operation === 'update') {
 		if (
+			!op.before.skipped &&
 			!hasCompressedFileContent(op.before) &&
 			typeof op.before.contentBase64 !== 'string'
 		) {
@@ -107,6 +117,7 @@ export function normalizeReversibleToolOpRecord(op: ReversibleToolOp) {
 		}
 		if (
 			op.after &&
+			!op.after.skipped &&
 			!hasCompressedFileContent(op.after) &&
 			typeof op.after.contentBase64 !== 'string'
 		) {
@@ -115,6 +126,7 @@ export function normalizeReversibleToolOpRecord(op: ReversibleToolOp) {
 	}
 	if (op.operation === 'create' && op.after?.kind === 'file') {
 		if (
+			!op.after.skipped &&
 			!hasCompressedFileContent(op.after) &&
 			typeof op.after.contentBase64 !== 'string'
 		) {
@@ -124,6 +136,7 @@ export function normalizeReversibleToolOpRecord(op: ReversibleToolOp) {
 	if (op.operation === 'delete' && op.before.kind === 'file') {
 		const before = op.before
 		if (
+			!before.skipped &&
 			!hasCompressedFileContent(before) &&
 			typeof before.contentBase64 !== 'string'
 		) {

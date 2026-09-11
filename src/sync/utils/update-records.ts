@@ -15,6 +15,7 @@ import { isSub } from '~/utils/is-sub'
 import { readLocalBinary } from '~/utils/local-vault-io'
 import { statVaultItem } from '~/utils/stat-vault-item'
 import { stdRemotePath } from '~/utils/std-remote-path'
+import { hashArrayBuffer } from '~/sync/conflict-content-hash'
 import type NutstorePlugin from '../..'
 import RemoveRemoteRecursivelyTask from '../tasks/remove-remote-recursively.task'
 
@@ -132,20 +133,27 @@ export async function updateMtimeInRecord(
 				if (!local || !remote) {
 					return
 				}
-				// Calculate base for file content
-				const base: { key: string } | undefined = await (async () => {
-					let baseKey: string | undefined
-					if (!local.isDir && isMergeablePath(localPath)) {
-						const buffer = await readLocalBinary(vault, localPath)
-						const { key } = await blobStore.store(buffer)
-						baseKey = key
-					}
-					return isNil(baseKey) ? undefined : { key: baseKey }
-				})()
+				// Store the base snapshot plus a content hash. The hash lets later
+				// decisions detect local content changes without depending on mtime.
+				let localHash: string | undefined
+				const base: { key: string; hash?: string } | undefined =
+					await (async () => {
+						let baseKey: string | undefined
+						if (!local.isDir && isMergeablePath(localPath)) {
+							const buffer = await readLocalBinary(vault, localPath)
+							localHash = await hashArrayBuffer(buffer)
+							const { key } = await blobStore.store(buffer)
+							baseKey = key
+						}
+						return isNil(baseKey)
+							? undefined
+							: { key: baseKey, hash: localHash }
+					})()
 
 				records.set(localPath, {
 					remote: remote.stat,
-					local,
+					local:
+						!local.isDir && localHash ? { ...local, hash: localHash } : local,
 					base,
 				})
 			} catch (e) {

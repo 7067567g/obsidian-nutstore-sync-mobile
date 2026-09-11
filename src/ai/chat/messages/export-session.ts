@@ -1,4 +1,4 @@
-import { normalizePath, TFile, Vault } from 'obsidian'
+import { normalizePath, requestUrl, TFile, Vault } from 'obsidian'
 import type {
 	AppUIMessage,
 	ChatDisplayBlock,
@@ -131,14 +131,26 @@ async function resolveImageArrayBuffer(imagePart: FilePart) {
 	if (!url) {
 		throw new Error('Unable to read non-URL image content')
 	}
-	const response = await fetch(url)
-	if (!response.ok) {
+	if (url.startsWith('data:')) {
+		const response = await fetch(url)
+		if (!response.ok) {
+			throw new Error(`Unable to read image content: ${response.status}`)
+		}
+		return {
+			arrayBuffer: await response.arrayBuffer(),
+			mimeType:
+				response.headers.get('content-type') || detectMimeTypeFromDataUrl(url),
+		}
+	}
+	// requestUrl bypasses CORS restrictions in the Obsidian mobile WebView.
+	const response = await requestUrl({ url, throw: false })
+	if (response.status < 200 || response.status >= 300) {
 		throw new Error(`Unable to read image content: ${response.status}`)
 	}
 	return {
-		arrayBuffer: await response.arrayBuffer(),
+		arrayBuffer: response.arrayBuffer,
 		mimeType:
-			response.headers.get('content-type') || detectMimeTypeFromDataUrl(url),
+			response.headers?.['content-type'] || detectMimeTypeFromDataUrl(url),
 	}
 }
 

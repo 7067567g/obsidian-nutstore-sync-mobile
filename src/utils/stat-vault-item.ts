@@ -40,7 +40,7 @@ export async function statVaultItem(
 			basename: basename(path),
 			isDir: true,
 			isDeleted: false,
-			mtime: adapterStat.mtime,
+			mtime: adapterStat.mtime ?? 0,
 		}
 	}
 	if (adapterStat.type === 'file') {
@@ -49,8 +49,8 @@ export async function statVaultItem(
 			basename: basename(path),
 			isDir: false,
 			isDeleted: false,
-			mtime: adapterStat.mtime,
-			size: adapterStat.size,
+			mtime: adapterStat.mtime ?? 0,
+			size: adapterStat.size ?? 0,
 		}
 	}
 }

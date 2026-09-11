@@ -5,6 +5,7 @@ import { existsLocalPath, readLocalBinary } from '~/utils/local-vault-io'
 import { MaybePromise } from '~/utils/types'
 import { NutstoreSync } from '..'
 import CleanRecordTask from '../tasks/clean-record.task'
+import { hashLocalVaultFile } from '~/sync/conflict-content-hash'
 import ConflictResolveTask from '../tasks/conflict-resolve.task'
 import FilenameErrorTask from '../tasks/filename-error.task'
 import MkdirLocalTask from '../tasks/mkdir-local.task'
@@ -110,6 +111,15 @@ export default abstract class BaseSyncDecider {
 			remoteBaseDir: this.remoteBaseDir,
 			getBaseContent,
 			compareFileContent,
+			getLocalContentHash: async (filePath: string) => {
+				const exists = await existsLocalPath(this.vault, filePath)
+				if (!exists) return undefined
+				try {
+					return await hashLocalVaultFile(this.vault, filePath)
+				} catch {
+					return undefined
+				}
+			},
 			taskFactory,
 		}
 	}

@@ -26,7 +26,10 @@ describe('AgentEventProjector', () => {
 			session,
 			agent,
 			runtime,
-			store: { persistSession: vi.fn(async () => undefined) } as never,
+			store: {
+				persistSession: vi.fn(async () => undefined),
+				flushSession: vi.fn(async () => undefined),
+			} as never,
 			messageFactory: new MessageFactory({ app: {} } as never, vi.fn()),
 			notify,
 			assistantMeta: { providerId: 'provider', modelId: 'model' },
@@ -110,7 +113,10 @@ describe('AgentEventProjector', () => {
 			session,
 			agent,
 			runtime,
-			store: { persistSession } as never,
+			store: {
+				persistSession,
+				flushSession: vi.fn(async () => undefined),
+			} as never,
 			messageFactory,
 			notify: vi.fn(),
 			assistantMeta: { providerId: 'provider', modelId: 'model' },
@@ -169,6 +175,59 @@ describe('AgentEventProjector', () => {
 		expect(persistSession).toHaveBeenCalledTimes(2)
 	})
 
+	function makeToolProjector(flushSession: () => Promise<void>) {
+		const agent = createEmptyMasterAgent(1)
+		const session: ChatSession = {
+			schemaVersion: 2,
+			id: 'session',
+			createdAt: 1,
+			updatedAt: 1,
+			subagents: { master: agent },
+		}
+		return new AgentEventProjector({
+			session,
+			agent,
+			store: {
+				persistSession: vi.fn(async () => undefined),
+				flushSession,
+			} as never,
+			messageFactory: new MessageFactory({ app: {} } as never, vi.fn()),
+			notify: vi.fn(),
+			assistantMeta: { providerId: 'provider', modelId: 'model' },
+			isTurnAlive: () => true,
+		})
+	}
+
+	it('flushes the session before a side-effecting tool executes', async () => {
+		const flushSession = vi.fn(async () => undefined)
+		const projector = makeToolProjector(flushSession)
+		await projector.project({
+			type: 'tool-execution-start',
+			toolCall: {
+				type: 'tool-call',
+				toolCallId: 'call-1',
+				toolName: 'bash',
+				input: {},
+			} as never,
+		})
+		expect(flushSession).toHaveBeenCalledWith('session')
+	})
+
+	it('does not flush before a read-only tool executes', async () => {
+		const flushSession = vi.fn(async () => undefined)
+		const projector = makeToolProjector(flushSession)
+		await projector.project({
+			type: 'tool-execution-start',
+			toolCall: {
+				type: 'tool-call',
+				toolCallId: 'call-1',
+				toolName: 'view_image',
+				input: {},
+			} as never,
+		})
+		expect(flushSession).not.toHaveBeenCalled()
+	})
+
 	it('rejects events after the turn loses ownership', async () => {
 		const agent = createEmptyMasterAgent(1)
 		const session: ChatSession = {
@@ -182,7 +241,10 @@ describe('AgentEventProjector', () => {
 		const projector = new AgentEventProjector({
 			session,
 			agent,
-			store: { persistSession: vi.fn(async () => undefined) } as never,
+			store: {
+				persistSession: vi.fn(async () => undefined),
+				flushSession: vi.fn(async () => undefined),
+			} as never,
 			messageFactory: new MessageFactory({ app: {} } as never, vi.fn()),
 			notify: vi.fn(),
 			assistantMeta: { providerId: 'provider', modelId: 'model' },

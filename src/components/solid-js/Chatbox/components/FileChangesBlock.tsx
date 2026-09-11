@@ -1,4 +1,4 @@
-import { createResource, createSignal, For, Show } from 'solid-js'
+import { createMemo, createResource, createSignal, For, Show } from 'solid-js'
 import {
 	buildFileDiff,
 	type FileDiff,
@@ -6,9 +6,23 @@ import {
 	type FileDiffLine,
 	type FileDiffSegment,
 } from '~/ai/chat/messages/file-diff'
-import type { ReversibleToolOp } from '~/ai/chat/types'
+import type { ReversibleFileSnapshot, ReversibleToolOp } from '~/ai/chat/types'
 import { t } from '../../i18n'
 import { CollapsibleBlock } from './CollapsibleBlock'
+
+function hasMissingSnapshot(change: ReversibleToolOp): boolean {
+	const snapshots: Array<ReversibleFileSnapshot | undefined> = []
+	if ('before' in change && change.before?.kind === 'file') {
+		snapshots.push(change.before)
+	}
+	if (
+		('after' in change && change.after?.kind === 'file') ||
+		(change.operation === 'create' && change.after?.kind === 'file')
+	) {
+		snapshots.push(change.after)
+	}
+	return snapshots.some((snapshot) => snapshot?.skipped?.reason === 'missing')
+}
 
 const OPERATION_LABEL = {
 	create: 'chatbox.ui.fileChanges.create',
@@ -158,6 +172,7 @@ function FileChange(props: {
 }) {
 	const [diff] = createResource(() => props.change, buildFileDiff)
 	const [open, setOpen] = createSignal(false)
+	const snapshotMissing = createMemo(() => hasMissingSnapshot(props.change))
 	return (
 		<Show when={diff()} keyed>
 			{(value) => (
@@ -169,7 +184,12 @@ function FileChange(props: {
 					open={open()}
 					onOpenChange={setOpen}
 				>
-					<Show when={value.binary}>
+					<Show when={snapshotMissing()}>
+						<div class=":uno: rounded-3 px-2 py-1.5 text-xs text-[var(--text-warning)]">
+							{t('chatbox.ui.fileChanges.snapshotMissing')}
+						</div>
+					</Show>
+					<Show when={value.binary && !snapshotMissing()}>
 						<div class=":uno: rounded-3 px-2 py-1.5 text-xs text-[var(--text-muted)]">
 							{t('chatbox.ui.fileChanges.binary')}
 						</div>

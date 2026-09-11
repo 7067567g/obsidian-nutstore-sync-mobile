@@ -56,6 +56,12 @@ interface AgentEventProjectorOptions {
 	isTurnAlive: () => boolean
 }
 
+const SIDE_EFFECT_TOOL_NAMES = new Set(['bash', 'apply_patch', 'task'])
+
+function needsCheckpointBeforeToolExecution(toolName: string) {
+	return SIDE_EFFECT_TOOL_NAMES.has(toolName) || toolName.startsWith('mcp__')
+}
+
 export class AgentEventProjector {
 	private assistantMessage?: AppUIMessage
 	private lastStreamNotifyAt = 0
@@ -99,6 +105,11 @@ export class AgentEventProjector {
 					this.options.runtime.runState = 'waiting_for_tools'
 				this.touch()
 				this.options.notify()
+				if (needsCheckpointBeforeToolExecution(event.toolCall.toolName)) {
+					// Semantic checkpoint borrowed from the DeepSeek Harness: make the
+					// recorded tool call durable before a tool can mutate the vault.
+					await this.options.store.flushSession(this.options.session.id)
+				}
 				return
 			}
 			case 'tool-execution-end': {
@@ -273,9 +284,16 @@ export class AgentEventProjector {
 	private projectTextDelta(delta: string) {
 		if (!delta || !this.options.isTurnAlive()) return
 		const message = this.ensureAssistantMessage()
-		const part = message.parts.find((item) => item.type === 'text')
-		if (part?.type === 'text') part.text += delta
-		else message.parts.push({ type: 'text', text: delta })
+		const partIndex = message.parts.findIndex((item) => item.type === 'text')
+		if (partIndex >= 0 && message.parts[partIndex]?.type === 'text') {
+			const part = message.parts[partIndex]
+			// Replace the part instead of mutating it: the view-projection cache
+			// keys parts by object identity, so an immutable update invalidates
+			// only this message while unchanged (possibly huge) parts are reused.
+			message.parts[partIndex] = { ...part, text: part.text + delta }
+		} else {
+			message.parts.push({ type: 'text', text: delta })
+		}
 		this.touch()
 		if (Date.now() - this.lastStreamNotifyAt >= 33) {
 			this.lastStreamNotifyAt = Date.now()

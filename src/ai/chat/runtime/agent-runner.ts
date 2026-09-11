@@ -135,6 +135,37 @@ export class AgentRunner {
 			recordMetadata,
 		}
 		const toolsContext = {
+			vault_list: {
+				app: stableContext.app,
+			},
+			vault_read: {
+				app: stableContext.app,
+				readTracker,
+			},
+			vault_grep: {
+				app: stableContext.app,
+				readTracker,
+			},
+			vault_links: {
+				app: stableContext.app,
+			},
+			vault_frontmatter: {
+				app: stableContext.app,
+				permissionGuard: stableContext.permissionGuard,
+				readTracker,
+			},
+			vault_batch_edit: {
+				app: stableContext.app,
+				permissionGuard: stableContext.permissionGuard,
+			},
+			settings_read: {
+				getSettingsSnapshot: stableContext.getSettingsSnapshot,
+			},
+			settings_patch: {
+				getSettingsSnapshot: stableContext.getSettingsSnapshot,
+				updateSettings: stableContext.updateSettings,
+				permissionGuard: stableContext.permissionGuard,
+			},
 			bash: {
 				...fileToolsContext,
 				getSettingsSnapshot: stableContext.getSettingsSnapshot,
@@ -150,6 +181,13 @@ export class AgentRunner {
 				fileSystemManager: stableContext.fileSystemManager,
 				readTracker,
 				viewImageAttachments,
+			},
+			view_pdf: {
+				app: stableContext.app,
+				readTracker,
+				viewImageAttachments,
+				supportsImageInput:
+					options.model?.modalities.input.includes('image') ?? false,
 			},
 			update_session_title: { recordMetadata },
 			...(tools.todowrite ? { todowrite: { session, recordMetadata } } : {}),

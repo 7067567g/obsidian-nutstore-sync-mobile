@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { ChatSession, LegacyChatSession } from '~/ai/chat/domain'
 import { createEmptyMasterAgent } from '~/ai/chat/messages/ui-message'
 import { normalizeRehydratedExecution } from '~/ai/chat/session/rehydration-execution'
@@ -48,6 +48,40 @@ describe('chat session persistence', () => {
 				'neutral-agent'
 			].model,
 		).toBeUndefined()
+	})
+
+	it('reuses the encoded Blob record for an unchanged Blob', async () => {
+		const blob = new Blob(['hello'])
+		const master = createEmptyMasterAgent(1)
+		master.operations.message = [
+			{
+				vaultPath: 'note.md',
+				operation: 'update',
+				before: {
+					kind: 'file',
+					contentCompressed: { compress: 'deflate', blob },
+				},
+				after: {
+					kind: 'file',
+					contentCompressed: { compress: 'deflate', blob },
+				},
+			},
+		]
+		const session: ChatSession = {
+			schemaVersion: 2,
+			id: 'session',
+			createdAt: 1,
+			updatedAt: 1,
+			subagents: { master },
+		}
+		const arrayBuffer = vi.spyOn(Blob.prototype, 'arrayBuffer')
+		try {
+			await encodeChatSessionForStorage(session)
+			await encodeChatSessionForStorage(session)
+			expect(arrayBuffer).toHaveBeenCalledTimes(1)
+		} finally {
+			arrayBuffer.mockRestore()
+		}
 	})
 
 	it('cleans incomplete execution state from every agent on rehydrate', () => {

@@ -100,4 +100,36 @@ describe('filterToolsForAgent', () => {
 			'mcp__翻译工具__translate',
 		])
 	})
+
+	it('exposes native vault and settings tools by agent role', () => {
+		const definitions = createAgentDefinitions({
+			fullAccess: false,
+			subagents: { explorer: { enabled: true }, memory: { enabled: true } },
+		})
+		expect(findDefinition(definitions, MASTER_AGENT_ID).tools).toEqual(
+			expect.arrayContaining([
+				'vault_list',
+				'vault_read',
+				'vault_grep',
+				'vault_links',
+				'vault_frontmatter',
+				'vault_batch_edit',
+				'view_pdf',
+				'settings_read',
+				'settings_patch',
+			]),
+		)
+		const explorerTools = findDefinition(definitions, EXPLORER_AGENT_ID).tools
+		expect(explorerTools).toEqual(
+			expect.arrayContaining([
+				'vault_list',
+				'vault_read',
+				'vault_grep',
+				'vault_links',
+				'view_pdf',
+			]),
+		)
+		expect(explorerTools).not.toContain('vault_frontmatter')
+		expect(explorerTools).not.toContain('settings_patch')
+	})
 })

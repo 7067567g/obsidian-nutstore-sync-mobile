@@ -24,6 +24,21 @@ describe('task tool execution context', () => {
 		expect(result).toContain('neutral-agent: Handles neutral work 🌿')
 	})
 
+	it('falls back to the registry when the summarizer omits toolsContext', () => {
+		const description = taskTool.description as never as (options?: {
+			context?: {
+				dispatchableDefinitions: readonly {
+					id: string
+					description: string
+				}[]
+			}
+		}) => string
+
+		expect(() => description()).not.toThrow()
+		expect(() => description({})).not.toThrow()
+		expect(() => description({ context: undefined })).not.toThrow()
+	})
+
 	it('forwards the captured turn origin instead of resolving a global active turn', async () => {
 		const origin: TaskOrigin = {
 			turnId: 'T1',

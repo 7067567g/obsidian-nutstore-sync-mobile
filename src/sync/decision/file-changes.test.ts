@@ -126,3 +126,58 @@ describe.each([
 		expect(input.getBaseContent).not.toHaveBeenCalled()
 	})
 })
+
+describe('content-hash and server-time evidence', () => {
+	it('keeps remote unchanged when etag is unchanged despite lastmod drift', async () => {
+		const { input, local, remote, record } = fixture('note.md', 'A')
+		const remoteStat = remote as typeof remote & { etag?: string }
+		const recordStat = record as typeof record & { remote: { etag?: string } }
+		remoteStat.etag = 'etag-1'
+		recordStat.remote.etag = 'etag-1'
+		remoteStat.mtime = 999
+
+		const changes = await getFileChanges(input, local, remoteStat, recordStat)
+
+		expect(changes.remoteChanged).toBe(false)
+	})
+
+	it('detects remote change from etag even when timestamps match', async () => {
+		const { input, local, remote, record } = fixture('note.md', 'A')
+		const remoteStat = remote as typeof remote & { etag?: string }
+		const recordStat = record as typeof record & { remote: { etag?: string } }
+		remoteStat.etag = 'etag-2'
+		recordStat.remote.etag = 'etag-1'
+		remoteStat.mtime = record.remote.mtime
+
+		const changes = await getFileChanges(input, local, remoteStat, recordStat)
+
+		expect(changes.remoteChanged).toBe(true)
+	})
+
+	it('uses the recorded local content hash when mtime alone changes', async () => {
+		const { input, local, remote, record } = fixture('note.md', 'A')
+		const inputWithHash = input as typeof input & {
+			getLocalContentHash?: (filePath: string) => Promise<string>
+		}
+		const recordStat = record as typeof record & { local: { hash?: string } }
+		local.mtime = record.local.mtime + 1
+		recordStat.local.hash = 'hash-A'
+		inputWithHash.getLocalContentHash = vi.fn(async () => 'hash-A')
+
+		const changes = await getFileChanges(
+			inputWithHash,
+			local,
+			remote,
+			recordStat,
+		)
+
+		expect(changes.localChanged).toBe(false)
+		expect(inputWithHash.getLocalContentHash).toHaveBeenCalledWith(local.path)
+		expect(input.logger.debug).toHaveBeenCalledWith(
+			expect.objectContaining({
+				contentCheck: 'content-hash-equal',
+				localChanged: false,
+			}),
+		)
+	})
+})

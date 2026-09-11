@@ -1,5 +1,5 @@
 import { cloneDeep } from 'lodash-es'
-import { Modal, Notice, Setting } from 'obsidian'
+import { Modal, Notice, Setting, type TextComponent } from 'obsidian'
 import { findPresetModelById } from '~/ai/catalog/config'
 import { AIModelConfig } from '~/ai/core/types'
 import {
@@ -8,6 +8,7 @@ import {
 } from '~/ai/chat/ui/modal-mount'
 import i18n from '~/i18n'
 import { addClassTokens, toggleClassTokens } from '~/utils/class-tokens'
+import { parseTokenLimitInput } from '~/utils/token-limit'
 import logger from '~/utils/logger'
 import type NutstorePlugin from '..'
 
@@ -30,6 +31,8 @@ export default class ModelEditorModal extends Modal {
 	private draft: AIModelConfig
 	private lastMatchedModelId?: string
 	private updateInputModalityTags?: () => void
+	private updateLimitInputs?: () => void
+	private limitsEdited = false
 	private cleanupModalMount?: () => void
 
 	constructor(
@@ -42,6 +45,7 @@ export default class ModelEditorModal extends Modal {
 		super(plugin.app)
 		this.draft = cloneDeep(model)
 		this.ensureModalities()
+		this.ensureLimit()
 		if (
 			this.isNew &&
 			!this.draft.id.trim() &&
@@ -107,6 +111,54 @@ export default class ModelEditorModal extends Modal {
 		}
 		updateTags()
 
+		const limitInputs: Array<{
+			field: 'context' | 'output'
+			text: TextComponent
+		}> = []
+		const updateLimitInputs = () => {
+			for (const { field, text } of limitInputs) {
+				text.setValue(String(this.draft.limit[field]))
+			}
+		}
+		this.updateLimitInputs = updateLimitInputs
+
+		new Setting(contentEl)
+			.setName(i18n.t('settings.ai.model.contextWindow'))
+			.setDesc(i18n.t('settings.ai.model.contextWindowDesc'))
+			.addText((text) => {
+				text.inputEl.type = 'text'
+				text.inputEl.inputMode = 'text'
+				text.inputEl.autocapitalize = 'off'
+				text.setPlaceholder(i18n.t('settings.ai.model.limitPlaceholder'))
+				text.onChange((value) => {
+					this.draft.limit = {
+						...this.draft.limit,
+						context: parseTokenLimitInput(value),
+					}
+					this.limitsEdited = true
+				})
+				limitInputs.push({ field: 'context', text })
+			})
+
+		new Setting(contentEl)
+			.setName(i18n.t('settings.ai.model.maxOutputTokens'))
+			.setDesc(i18n.t('settings.ai.model.maxOutputTokensDesc'))
+			.addText((text) => {
+				text.inputEl.type = 'text'
+				text.inputEl.inputMode = 'text'
+				text.inputEl.autocapitalize = 'off'
+				text.setPlaceholder(i18n.t('settings.ai.model.limitPlaceholder'))
+				text.onChange((value) => {
+					this.draft.limit = {
+						...this.draft.limit,
+						output: parseTokenLimitInput(value),
+					}
+					this.limitsEdited = true
+				})
+				limitInputs.push({ field: 'output', text })
+			})
+		updateLimitInputs()
+
 		new Setting(contentEl)
 			.addButton((button) =>
 				button
@@ -154,6 +206,7 @@ export default class ModelEditorModal extends Modal {
 		this.cleanupModalMount = undefined
 		this.contentEl.empty()
 		this.updateInputModalityTags = undefined
+		this.updateLimitInputs = undefined
 	}
 
 	private ensureModalities() {
@@ -162,6 +215,14 @@ export default class ModelEditorModal extends Modal {
 			this.draft.modalities.input,
 		)
 		this.draft.modalities.output = this.draft.modalities.output || []
+	}
+
+	private ensureLimit() {
+		this.draft.limit = {
+			...this.draft.limit,
+			context: this.draft.limit?.context ?? 0,
+			output: this.draft.limit?.output ?? 0,
+		}
 	}
 
 	private normalizeInputModalities(
@@ -188,7 +249,17 @@ export default class ModelEditorModal extends Modal {
 				...cloneDeep(presetModel.modalities),
 				input: this.normalizeInputModalities(presetModel.modalities.input),
 			},
+			// Do not silently downgrade a manually configured context/output limit
+			// (e.g. 1M) to the preset's smaller value on model-id blur. Presets only
+			// fill in when both current limits are still 0.
+			limit:
+				this.limitsEdited ||
+				this.draft.limit.context > 0 ||
+				this.draft.limit.output > 0
+					? cloneDeep(this.draft.limit)
+					: cloneDeep(presetModel.limit),
 		}
 		this.updateInputModalityTags?.()
+		this.updateLimitInputs?.()
 	}
 }

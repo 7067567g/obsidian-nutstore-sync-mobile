@@ -6,9 +6,12 @@ import {
 	selectContextTimeline,
 } from '~/ai/chat/messages/ui-message'
 import {
+	createContextCompressionPlan,
 	findRecentTurnStartIndex,
+	generateContextCompression,
 	resolveSummaryContext,
 	resolveContextPressure,
+	resolveContextWindow,
 	runContextCompression,
 	shouldAutoCompressAgent,
 	shouldStartContextCompaction,
@@ -56,6 +59,75 @@ describe('context compression', () => {
 		generateText.mockResolvedValue({ text: 'compressed context' })
 		buildAgentSystemPrompt.mockReset()
 		buildAgentSystemPrompt.mockResolvedValue('SYSTEM')
+	})
+
+	describe('tool-pairing safe cuts', () => {
+		function toolMessage(
+			id: string,
+			createdAt: number,
+			state: 'output-available' | 'input-available',
+		): AppUIMessage {
+			const part: AppUIMessage['parts'][number] =
+				state === 'output-available'
+					? {
+							type: 'dynamic-tool',
+							toolName: 'bash',
+							toolCallId: `${id}-call`,
+							state: 'output-available',
+							input: {},
+							output: 'ok',
+						}
+					: {
+							type: 'dynamic-tool',
+							toolName: 'bash',
+							toolCallId: `${id}-call`,
+							state: 'input-available',
+							input: {},
+						}
+			return {
+				id,
+				role: 'assistant',
+				metadata: { createdAt },
+				parts: [part],
+			}
+		}
+
+		it('retains an incomplete tool-call turn instead of summarizing it', async () => {
+			const agent = createEmptyMasterAgent(1)
+			agent.timeline = [
+				message('u1', 'user', 1),
+				toolMessage('a1', 2, 'output-available'),
+				message('u2', 'user', 3),
+				toolMessage('a2', 4, 'input-available'),
+				message('u3', 'user', 5),
+				message('a3', 'assistant', 6),
+			]
+
+			const plan = await createContextCompressionPlan(
+				agent,
+				{ id: 'model', limit: { context: 0, output: 0 } } as never,
+				{ allowFullContext: true },
+			)
+
+			expect(plan?.sourceMessageIds).toEqual(['u1', 'a1'])
+			expect(plan?.summarizedThroughMessageId).toBe('a1')
+		})
+
+		it('returns no plan when the first turn has an incomplete tool call', async () => {
+			const agent = createEmptyMasterAgent(1)
+			agent.timeline = [
+				message('u1', 'user', 1),
+				toolMessage('a1', 2, 'input-available'),
+			]
+
+			const plan = await createContextCompressionPlan(
+				agent,
+				{ id: 'model', limit: { context: 0, output: 0 } } as never,
+				{ allowFullContext: true },
+			)
+
+			expect(plan).toBeUndefined()
+		})
 	})
 
 	it('does not commit a checkpoint when the summarizer returns no text', async () => {
@@ -306,6 +378,74 @@ describe('context compression', () => {
 		).toBe(true)
 	})
 
+	it('rejects a summary that does not shrink the compacted range', async () => {
+		generateText.mockResolvedValueOnce({ text: 'x'.repeat(2000) })
+		const plan = {
+			summarizedThroughMessageId: 'u1',
+			sourceMessageIds: ['u1'],
+			retainedMessageIds: [],
+			messages: [
+				{
+					id: 'u1',
+					role: 'user',
+					metadata: { createdAt: 1 },
+					parts: [{ type: 'text', text: 'small' }],
+				},
+			],
+		}
+
+		const summary = await generateContextCompression({
+			provider: {} as never,
+			model: { id: 'model' } as never,
+			session: {} as never,
+			plan: plan as never,
+			tools: {} as never,
+		})
+
+		expect(summary).toBeUndefined()
+	})
+	it('prunes oversized historical tool results before summarizing', async () => {
+		generateText.mockResolvedValueOnce({ text: 'short summary' })
+		const plan = {
+			summarizedThroughMessageId: 'tool-message',
+			sourceMessageIds: ['tool-message'],
+			retainedMessageIds: [],
+			messages: [
+				{
+					id: 'tool-message',
+					role: 'assistant',
+					metadata: { createdAt: 1 },
+					parts: [
+						{
+							type: 'dynamic-tool',
+							toolName: 'bash',
+							toolCallId: 'tool-call',
+							state: 'output-available',
+							input: {},
+							output: 'x'.repeat(20_000),
+						},
+					],
+				},
+			],
+		}
+
+		const summary = await generateContextCompression({
+			provider: {} as never,
+			model: { id: 'model' } as never,
+			session: {} as never,
+			plan: plan as never,
+			tools: {} as never,
+		})
+
+		expect(summary).toBe('short summary')
+		const request = generateText.mock.calls.at(-1)?.[0] as {
+			messages: unknown[]
+		}
+		const serialized = JSON.stringify(request.messages)
+		expect(serialized).toContain('tool result middle omitted')
+		expect(serialized).not.toContain('x'.repeat(20_000))
+	})
+
 	it('forwards shared tool schemas but never execution or tool context to the summarizer', async () => {
 		const master = createEmptyMasterAgent(1)
 		master.timeline = [message('u1', 'user', 1)]
@@ -505,5 +645,31 @@ describe('context compression', () => {
 			'BUILT',
 			COMPRESSION_PROMPT,
 		])
+	})
+})
+
+describe('resolveContextWindow', () => {
+	it('prefers an explicit context limit', () => {
+		expect(
+			resolveContextWindow({
+				limit: { context: 1_000_000, output: 8192 },
+			} as never),
+		).toBe(1_000_000)
+	})
+
+	it('falls back to the input limit when context metadata is missing', () => {
+		expect(
+			resolveContextWindow({
+				limit: { context: 0, input: 131_072, output: 8192 },
+			} as never),
+		).toBe(131_072)
+	})
+
+	it('keeps the conservative default when no limit is published', () => {
+		expect(
+			resolveContextWindow({
+				limit: { context: 0, output: 0 },
+			} as never),
+		).toBe(256 * 1024)
 	})
 })

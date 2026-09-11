@@ -23,7 +23,10 @@ import type {
 import { listAvailableAdapterEntries } from '~/ai/tools/available-adapter-entries'
 import type { PermissionGuard } from '~/ai/tools/permission-guard'
 import type { ReversibleFileSnapshot, ReversibleToolOp } from '~/ai/chat/types'
-import { decodeReversibleFileSnapshot } from '~/ai/chat/messages/reversible-content'
+import {
+	decodeReversibleFileSnapshot,
+	isSkippedFileSnapshot,
+} from '~/ai/chat/messages/reversible-content'
 import { mkdirsVault } from '~/utils/mkdirs-vault'
 import {
 	existsLocalPath,
@@ -33,6 +36,8 @@ import {
 	writeLocalBinary,
 } from '~/utils/local-vault-io'
 import { statVaultItem } from '~/utils/stat-vault-item'
+import { perfMetrics } from '~/diagnostics/perf-metrics'
+
 import { AGENTS_VAULT_PATH } from './mount-points'
 
 const FILE_MODE = 0o644
@@ -236,6 +241,11 @@ export class ReversibleOpRecorder {
 		left: Extract<ReversibleToolOp, { operation: 'update' }>['before'],
 		right: Extract<ReversibleToolOp, { operation: 'update' }>['before'],
 	) {
+		if (isSkippedFileSnapshot(left) || isSkippedFileSnapshot(right)) {
+			// Without retained content we cannot prove equality; keep the
+			// transition recorded so the operation is not silently dropped.
+			return false
+		}
 		const [leftBuffer, rightBuffer] = await Promise.all([
 			decodeReversibleFileSnapshot(left),
 			decodeReversibleFileSnapshot(right),
@@ -377,10 +387,13 @@ export class ObsidianVaultFs implements IFileSystem {
 		if (typeof this.vault.adapter.list === 'function') {
 			if (
 				this.isInternalDirectory(normalized) &&
-				!(await this.vault.adapter.exists(adapterPath))
+				!(await perfMetrics.trackBridge('bash.adapter.exists', () =>
+					this.vault.adapter.exists(adapterPath),
+				))
 			) {
 				return { files: [], folders: [] }
 			}
+			perfMetrics.recordBridgeCall('bash.adapter.list')
 			const listed = await listAvailableAdapterEntries(
 				this.vault.adapter,
 				adapterPath,
@@ -520,7 +533,9 @@ export class ObsidianVaultFs implements IFileSystem {
 		}
 		if (
 			this.isInternalDirectory(normalized) &&
-			!(await this.vault.adapter.exists(this.toVaultPath(normalized)))
+			!(await perfMetrics.trackBridge('bash.adapter.exists', () =>
+				this.vault.adapter.exists(this.toVaultPath(normalized)),
+			))
 		) {
 			return {
 				isFile: false,
@@ -537,7 +552,9 @@ export class ObsidianVaultFs implements IFileSystem {
 		}
 		const adapterStat =
 			stat.isDir && stat.mtime === undefined
-				? await this.vault.adapter.stat(this.toVaultPath(normalized))
+				? await perfMetrics.trackBridge('bash.adapter.stat', () =>
+						this.vault.adapter.stat(this.toVaultPath(normalized)),
+					)
 				: undefined
 		return {
 			isFile: !stat.isDir,
@@ -653,6 +670,7 @@ export class ObsidianVaultFs implements IFileSystem {
 				await copyRecursive(this, src, dest, { recursive: true })
 				await this.rm(src, { recursive: true })
 			} else if (sourceIsAdapterPath) {
+				perfMetrics.recordBridgeCall('bash.adapter.rename')
 				await this.vault.adapter.rename(
 					this.toVaultPath(src),
 					this.toVaultPath(dest),

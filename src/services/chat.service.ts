@@ -45,7 +45,11 @@ import { SessionProcessor } from '~/ai/chat/runtime/session-processor'
 import { TaskManager } from '~/ai/chat/runtime/task-manager'
 import { ToolExecutor } from '~/ai/chat/runtime/tool-executor'
 import { CHAT_INDEX_KEY, CHAT_META_KEY } from '~/ai/chat/prompts'
-import { SessionsFileBackend } from '~/ai/chat/session/session-files'
+import {
+	CHAT_SESSIONS_DIR,
+	SessionsFileBackend,
+} from '~/ai/chat/session/session-files'
+import { SessionRecovery } from '~/ai/chat/session/session-recovery'
 import {
 	SessionStore,
 	type SessionLegacyStore,
@@ -127,14 +131,18 @@ export default class ChatService extends BaseService {
 			() => plugin.settings.ai,
 			this.state,
 			() => this.notify(),
-			(session) => this.store.persistSession(session),
+			(session) => this.store.persistSessionSoon(session),
 		)
 		const legacyStore = this.createLegacySessionStore()
 		this.store = new SessionStore(
 			this.state,
 			this.selection,
-			new SessionsFileBackend(plugin.app.vault),
+			new SessionsFileBackend(plugin.app.vault, {
+				maxInlineOperationBytes: () =>
+					plugin.settings.ai.maxInlineOperationBytes,
+			}),
 			legacyStore,
+			new SessionRecovery(plugin.app.vault, CHAT_SESSIONS_DIR),
 			(sessionId, session) => {
 				this.runtimeStates.resetExecution(sessionId)
 				this.taskManager?.cleanupSessionAgentTracking(session)
@@ -234,13 +242,36 @@ export default class ChatService extends BaseService {
 		this.notifier.notify()
 	}
 
-	override onunload() {
+	async runOpsGcReport() {
+		const report = await this.store.collectOperationGcReport()
+		logger.info('Ops GC report', report)
+		return report
+	}
+
+	async recoverPendingWrites() {
+		await this.store.recoverPendingWrites()
+	}
+
+	async flushPendingSessions() {
+		await this.store.flushAll().catch((error) => {
+			logger.error('Failed to flush chat sessions', error)
+		})
+	}
+
+	override async onunload() {
 		for (const [sessionId, session] of this.state.loadedSessions) {
-			this.state.deletedSessionIds.add(sessionId)
 			this.compactionCoordinator.cancel(sessionId)
 			this.taskManager.cancelAllNonTerminalAgents(session)
 			this.taskManager.cleanupSessionAgentTracking(session)
 			this.runtimeStates.resetExecution(sessionId)
+		}
+		// Flush the coalesced write-behind queues before marking sessions deleted,
+		// so the final state (including cancellation events) reaches disk.
+		await this.store.flushAll().catch((error) => {
+			logger.error('Failed to flush chat sessions on unload', error)
+		})
+		for (const sessionId of this.state.loadedSessions.keys()) {
+			this.state.deletedSessionIds.add(sessionId)
 		}
 	}
 
@@ -355,6 +386,7 @@ export default class ChatService extends BaseService {
 			mcpServers: this.buildMcpServerOptions(activeSession),
 			usage,
 			contextWindow,
+			windowedRendering: this.plugin.settings.ai.windowedRendering !== false,
 			...this.bindViewActions(),
 		}
 	}
@@ -507,9 +539,7 @@ export default class ChatService extends BaseService {
 		}
 		session.disabledMcpServers = disabled.size > 0 ? [...disabled] : undefined
 		this.notify()
-		void this.store.persistSession(session).catch((error) => {
-			logger.error('Failed to persist session MCP server toggles', error)
-		})
+		this.store.persistSessionSoon(session)
 	}
 
 	async ensureSession() {
@@ -528,9 +558,7 @@ export default class ChatService extends BaseService {
 		this.store.upsertSessionIndexItem(session, i18n.t('chatbox.newChat'), true)
 		this.runtimeStates.get(session.id)
 		this.notify()
-		void this.store.persistSession(session).catch((error) => {
-			logger.error('Failed to persist new chat session', error)
-		})
+		this.store.persistSessionSoon(session)
 		void this.store.persistMetaAndIndex().catch((error) => {
 			logger.error('Failed to persist chat session index', error)
 		})

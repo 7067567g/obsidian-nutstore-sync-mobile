@@ -1,5 +1,8 @@
 import { diff_match_patch } from 'diff-match-patch'
-import { decodeReversibleFileSnapshot } from './reversible-content'
+import {
+	decodeReversibleFileSnapshot,
+	isSkippedFileSnapshot,
+} from './reversible-content'
 import type { ReversibleFileSnapshot, ReversibleToolOp } from '../types'
 
 const CONTEXT_LINES = 2
@@ -227,6 +230,7 @@ export function buildLineDiff(
 }
 
 async function snapshotText(snapshot: ReversibleFileSnapshot) {
+	if (isSkippedFileSnapshot(snapshot)) return undefined
 	const bytes = new Uint8Array(await decodeReversibleFileSnapshot(snapshot))
 	if (bytes.includes(0)) return undefined
 	const text = new TextDecoder().decode(bytes)
