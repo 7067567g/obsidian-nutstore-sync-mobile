@@ -1,4 +1,4 @@
-import type { JSX } from 'solid-js'
+import { Show, createEffect, createSignal, type JSX } from 'solid-js'
 
 export function CollapsibleBlock(props: {
 	summary: JSX.Element
@@ -7,11 +7,20 @@ export function CollapsibleBlock(props: {
 	onOpenChange?: (open: boolean) => void
 	children: JSX.Element
 }) {
+	const [mounted, setMounted] = createSignal(false)
+
+	createEffect(() => {
+		if (props.open) setMounted(true)
+	})
+
 	return (
 		<details
 			class=":uno: group rounded-3 border border-[var(--background-modifier-border)] bg-[var(--background-primary-alt)]"
 			open={props.open}
-			onToggle={(event) => props.onOpenChange?.(event.currentTarget.open)}
+			onToggle={(event) => {
+				if (event.currentTarget.open) setMounted(true)
+				props.onOpenChange?.(event.currentTarget.open)
+			}}
 		>
 			<summary class=":uno: flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-xs text-[var(--text-muted)] marker:hidden">
 				{props.summary}
@@ -20,7 +29,7 @@ export function CollapsibleBlock(props: {
 					<span class=":uno: i-lucide-chevron-down size-4 shrink-0 transition-transform group-open:[transform:rotate(180deg)]" />
 				</div>
 			</summary>
-			{props.children}
+			<Show when={mounted()}>{props.children}</Show>
 		</details>
 	)
 }

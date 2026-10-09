@@ -13,6 +13,7 @@ import type { ChatSession } from '~/ai/chat/domain'
 import type { MessageFactory } from '~/ai/chat/messages/message-factory'
 import { messageToText } from '~/ai/chat/messages/message-utils'
 import {
+	hasIncompleteToolCalls,
 	selectContextTimeline,
 	uiMessagesToModelMessages,
 } from '~/ai/chat/messages/ui-message'
@@ -45,6 +46,8 @@ import {
 	InMemoryViewImageAttachmentRegistry,
 } from '~/ai/tools/view-image-attachments'
 import { createAbortError } from '~/ai/transport/abort'
+import { createCheckpointedTools } from '~/ai/chat/runtime/tool-checkpoint'
+import { ToolOutputRetention } from '~/ai/chat/runtime/tool-output-retention'
 import i18n from '~/i18n'
 
 export type AgentTurnResult =
@@ -71,22 +74,31 @@ interface RunAgentTurnOptions {
 }
 
 export class AgentRunner {
+	private readonly retention: ToolOutputRetention
+
 	constructor(
 		private toolExecutor: ToolExecutor,
 		private store: SessionStore,
 		private messageFactory: MessageFactory,
 		private notify: () => void,
 		private app: App,
-	) {}
+	) {
+		this.retention = new ToolOutputRetention(app.vault)
+	}
 
 	async runTurn(options: RunAgentTurnOptions): Promise<AgentTurnResult> {
 		const { session, agent } = options
 		const definition = this.toolExecutor.getAgentDefinition(agent.type)
-		const tools = await this.toolExecutor.createTools(
-			options.depth,
-			definition,
+		const tools = createCheckpointedTools(
+			await this.toolExecutor.createTools(
+				options.depth,
+				definition,
+				session,
+				options.model,
+			),
 			session,
-			options.model,
+			this.store,
+			options.abortSignal,
 		)
 		const stableContext = this.toolExecutor.createStableToolsContext(
 			session,
@@ -113,6 +125,7 @@ export class AgentRunner {
 			notify: this.notify,
 			assistantMeta: options.assistantMeta,
 			isTurnAlive: options.isTurnAlive,
+			retention: this.retention,
 		})
 
 		const { model } = resolveLanguageModel(options.provider, options.model.id)
@@ -141,6 +154,15 @@ export class AgentRunner {
 			vault_read: {
 				app: stableContext.app,
 				readTracker,
+			},
+			vault_stat: {
+				app: stableContext.app,
+			},
+			vault_json: {
+				app: stableContext.app,
+			},
+			vault_hash: {
+				app: stableContext.app,
 			},
 			vault_grep: {
 				app: stableContext.app,
@@ -223,6 +245,9 @@ export class AgentRunner {
 			steps,
 		}) => {
 			if (!steps.at(-1)?.toolCalls.length) return false
+			// Never yield or suspend at a boundary where a provider tool result may
+			// still arrive; an unfinished tool call must stay paired with its result.
+			if (hasIncompleteToolCalls(agent)) return false
 			shouldSuspend = (await options.shouldSuspendAfterToolStep?.()) ?? false
 			return shouldSuspend
 		}
@@ -234,6 +259,8 @@ export class AgentRunner {
 			stopWhen: [isLoopFinished(), repeatedToolCalls, suspendAtStepBoundary],
 			maxOutputTokens: resolveModelOutputLimit(options.model),
 			prepareStep: async ({ messages, steps }) => {
+				// Request/step barrier: a failed flush aborts before the next model call.
+				await this.store.flushSession(session.id)
 				readTracker.resetSnapshot()
 				await projector.project({ type: 'step-start' })
 				const attachments = viewImageAttachments.takeUninjected(
@@ -246,6 +273,9 @@ export class AgentRunner {
 				}
 			},
 		})
+		// Request barrier: persist the complete logged request prefix before the
+		// model adapter is dispatched.
+		await this.store.flushSession(session.id)
 		const result = await toolLoop.stream({
 			messages: prepareMessagesForModel(
 				options.provider,

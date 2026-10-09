@@ -158,6 +158,8 @@ export interface NutstoreSettings {
 		nutstoreLlmGateway?: NutstoreLlmGatewayAuthSettings
 		/** Serialized size above which a message's operations move to a sidecar file. */
 		maxInlineOperationBytes?: number
+		/** Active wall-clock timeout for cooperative tool execution; undefined disables it. */
+		toolTimeoutMs?: number
 		/** Browser-native content-visibility windowing for long chat timelines. */
 		windowedRendering?: boolean
 	}
@@ -239,6 +241,7 @@ export const DEFAULT_SETTINGS: NutstoreSettings = {
 		},
 		nutstoreLlmGateway: {},
 		maxInlineOperationBytes: 256 * 1024,
+		toolTimeoutMs: 120_000,
 	},
 	configDirSyncMode: 'none',
 }

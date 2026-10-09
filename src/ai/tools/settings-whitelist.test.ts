@@ -112,3 +112,35 @@ describe('settings whitelist model limits', () => {
 		expect(JSON.stringify(serialized)).not.toContain('secret')
 	})
 })
+
+describe('settings whitelist tool timeout', () => {
+	it('parses a tool timeout patch in seconds', () => {
+		const parsed = parseSettingsWhitelistJson(
+			JSON.stringify({ toolTimeoutSeconds: 5 }),
+		)
+		expect(parsed.ok).toBe(true)
+		if (!parsed.ok) return
+		expect(parsed.patch.toolTimeoutSeconds).toBe(5)
+	})
+
+	it('applies and serializes the tool timeout without exposing secrets', () => {
+		const settings = settingsFixture() as never as {
+			ai: { toolTimeoutMs?: number }
+		}
+		applyNormalizedSettingsPatch(settings, { toolTimeoutSeconds: 5 })
+		expect(settings.ai.toolTimeoutMs).toBe(5000)
+		const serialized = JSON.parse(serializeSettingsWhitelist(settings)) as {
+			toolTimeoutSeconds: number
+		}
+		expect(serialized.toolTimeoutSeconds).toBe(5)
+	})
+
+	it('treats 0 as disabling the timeout', () => {
+		const settings = settingsFixture() as never as {
+			ai: { toolTimeoutMs?: number }
+		}
+		settings.ai.toolTimeoutMs = 5000
+		applyNormalizedSettingsPatch(settings, { toolTimeoutSeconds: 0 })
+		expect(settings.ai.toolTimeoutMs).toBeUndefined()
+	})
+})

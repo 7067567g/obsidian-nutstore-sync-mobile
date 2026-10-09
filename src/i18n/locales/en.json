@@ -344,6 +344,10 @@
 			"windowedRendering": {
 				"name": "Windowed rendering for long sessions",
 				"desc": "Use browser-native content-visibility to skip layout/paint for offscreen messages. Disable to fall back to the old full render."
+			},
+			"toolTimeout": {
+				"name": "Tool timeout (seconds)",
+				"desc": "Active wall-clock budget for cooperative tools such as virtual bash. Leave blank to disable. Hidden/background time is excluded."
 			}
 		},
 		"logout": {

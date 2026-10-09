@@ -1,11 +1,14 @@
 import { normalizePath, Vault } from 'obsidian'
-import { atomicReplaceContent } from '~/utils/atomic-replace'
+import {
+	ATOMIC_BACKUP_MARKER,
+	ATOMIC_TEMP_MARKER,
+	atomicReplaceContent,
+} from '~/utils/atomic-replace'
 import { readLocalText } from '~/utils/local-vault-io'
 import { mkdirsVault } from '~/utils/mkdirs-vault'
 import {
 	agentPathKey,
 	isJsonRecord,
-	parseSessionLogLine,
 	SESSION_INDEX_FILENAME,
 	SESSION_LOG_FILENAME,
 	SESSION_META_FILENAME,
@@ -35,6 +38,8 @@ interface SessionState {
 	generation: number
 	activeSegment?: string
 	metaJson?: string
+	/** Set when the log has a torn tail; next append rewrites prefix + recovered tail. */
+	pendingLogRepair?: { prefix: string; recovered: JsonRecord[] }
 	agentMeta: Map<string, string>
 	messages: Map<string, MessageEntry>
 	operations: Map<string, OperationEntry>
@@ -46,6 +51,16 @@ interface SourceContent {
 }
 
 const messageJsonCache = new WeakMap<object, string>()
+
+function isParseableJson(text: string): boolean {
+	try {
+		JSON.parse(text)
+		return true
+	} catch {
+		return false
+	}
+}
+
 const operationJsonCache = new WeakMap<object, string>()
 
 function stateKey(pathKey: string, messageId: string) {
@@ -89,6 +104,10 @@ function collectSourceContent(sourceSession: unknown): SourceContent {
 
 function applyRecordToState(state: SessionState, record: JsonRecord) {
 	const type = record.type
+	if (type === 'session-meta' && isJsonRecord(record.meta)) {
+		state.metaJson = JSON.stringify(record.meta)
+		return
+	}
 	if (type === 'snapshot' && isJsonRecord(record.session)) {
 		state.metaJson = JSON.stringify(sessionWithoutSubagents(record.session))
 		state.messages.clear()
@@ -150,11 +169,110 @@ function applyRecordToState(state: SessionState, record: JsonRecord) {
 	}
 }
 
-function parseLogLines(text: string) {
-	return text
-		.split('\n')
-		.map(parseSessionLogLine)
-		.filter((record): record is JsonRecord => !!record)
+export class SessionLogCorruptionError extends Error {
+	constructor(
+		message: string,
+		readonly lineNumber: number,
+		readonly lineText: string,
+	) {
+		super(message)
+		this.name = 'SessionLogCorruptionError'
+	}
+}
+
+export interface SessionLogScan {
+	/** Newline-terminated records that are durably committed. */
+	records: JsonRecord[]
+	/** Safe prefix length before any torn/incomplete tail. */
+	committedLength: number
+	/**
+	 * Complete records found in the final frame that has no trailing newline.
+	 * They are applied for reading and rewritten durably by the next append.
+	 */
+	recoveredTail: JsonRecord[]
+	/** The raw torn tail (recovered or partial) that follows `committedLength`. */
+	tornTail: string
+}
+
+function parseCommittedLine(
+	line: string,
+	lineNumber: number,
+): JsonRecord | null {
+	if (!line.trim()) return null
+	let parsed: unknown
+	try {
+		parsed = JSON.parse(line)
+	} catch {
+		throw new SessionLogCorruptionError(
+			`Session log line ${lineNumber} is not valid JSON`,
+			lineNumber,
+			line,
+		)
+	}
+	if (!isJsonRecord(parsed) || typeof parsed.type !== 'string') {
+		throw new SessionLogCorruptionError(
+			`Session log line ${lineNumber} is not a session record`,
+			lineNumber,
+			line,
+		)
+	}
+	return parsed
+}
+
+/**
+ * Scan a JSONL session log without trusting a trailing partial frame.
+ * Committed bytes end at the last newline whose line parsed as a record.
+ * A complete final record without a trailing newline is returned as
+ * `recoveredTail` so the next append can rewrite it durably.
+ */
+export function scanSessionLog(text: string): SessionLogScan {
+	const records: JsonRecord[] = []
+	let offset = 0
+	let lineNumber = 0
+	while (offset < text.length) {
+		const newline = text.indexOf('\n', offset)
+		if (newline === -1) {
+			const fragment = text.slice(offset)
+			if (!fragment.trim()) {
+				return {
+					records,
+					committedLength: text.length,
+					recoveredTail: [],
+					tornTail: '',
+				}
+			}
+			try {
+				const parsed: unknown = JSON.parse(fragment)
+				if (isJsonRecord(parsed) && typeof parsed.type === 'string') {
+					return {
+						records,
+						committedLength: offset,
+						recoveredTail: [parsed],
+						tornTail: fragment,
+					}
+				}
+			} catch {
+				/* Not a complete record: incomplete torn tail. */
+			}
+			return {
+				records,
+				committedLength: offset,
+				recoveredTail: [],
+				tornTail: fragment,
+			}
+		}
+		const line = text.slice(offset, newline)
+		offset = newline + 1
+		lineNumber += 1
+		const record = parseCommittedLine(line, lineNumber)
+		if (record) records.push(record)
+	}
+	return {
+		records,
+		committedLength: text.length,
+		recoveredTail: [],
+		tornTail: '',
+	}
 }
 
 function materializeSession(
@@ -169,6 +287,7 @@ function materializeSession(
 		operations: Map<string, unknown>
 	}
 
+	let topLevel: JsonRecord | undefined
 	const agents = new Map<string, Accumulator>()
 	const ensureAgent = (path: string[]) => {
 		const key = agentPathKey(path)
@@ -196,6 +315,10 @@ function materializeSession(
 		if (type === 'snapshot' && isJsonRecord(record.session)) {
 			// A snapshot is the complete session, so records before it must not leak
 			// into the materialized timeline.
+			topLevel = {
+				...(topLevel ?? {}),
+				...sessionWithoutSubagents(record.session),
+			}
 			agents.clear()
 			for (const split of splitSessionSnapshot(record.session)) {
 				const agent = ensureAgent(split.path)
@@ -211,6 +334,10 @@ function materializeSession(
 					agent.operations.set(messageId, operations)
 				}
 			}
+			continue
+		}
+		if (type === 'session-meta' && isJsonRecord(record.meta)) {
+			topLevel = { ...(topLevel ?? {}), ...record.meta }
 			continue
 		}
 		if (!path.length) continue
@@ -290,7 +417,7 @@ function materializeSession(
 			rootSubagents[path[0]] = agent
 		}
 	}
-	return { ...meta, subagents: rootSubagents }
+	return { ...meta, ...(topLevel ?? {}), subagents: rootSubagents }
 }
 
 export class SessionLogBackend {
@@ -331,9 +458,7 @@ export class SessionLogBackend {
 			if (!isJsonRecord(parsed)) return {}
 			return {
 				generation:
-					typeof parsed.generation === 'number'
-						? parsed.generation
-						: undefined,
+					typeof parsed.generation === 'number' ? parsed.generation : undefined,
 				activeSegment:
 					typeof parsed.activeSegment === 'string'
 						? parsed.activeSegment
@@ -376,13 +501,18 @@ export class SessionLogBackend {
 
 	async exists(id: string): Promise<boolean> {
 		try {
-			return await this.adapter.exists(this.logPath(id))
+			return (
+				(await this.adapter.exists(this.logPath(id))) ||
+				(await this.adapter.exists(this.metaPath(id))) ||
+				(await this.adapter.exists(this.indexPath(id)))
+			)
 		} catch {
 			return false
 		}
 	}
 
 	async readSessionFile(id: string): Promise<JsonRecord> {
+		await this.promoteSessionTemps(id)
 		const metaText = await readLocalText(this.vault, this.metaPath(id)).catch(
 			() => null,
 		)
@@ -396,7 +526,10 @@ export class SessionLogBackend {
 		)
 		const records: JsonRecord[] = []
 		if (segment) records.push(segment)
-		if (logText) records.push(...parseLogLines(logText))
+		if (logText) {
+			const scan = scanSessionLog(logText)
+			records.push(...scan.records, ...scan.recoveredTail)
+		}
 		if (records.length === 0) {
 			throw new Error(`Session log not found: ${this.logPath(id)}`)
 		}
@@ -414,11 +547,14 @@ export class SessionLogBackend {
 			? collectSourceContent(sourceSession)
 			: { messages: new Map(), operations: new Map() }
 		const records: JsonRecord[] = []
+		const sessionMeta = sessionWithoutSubagents(session)
+		const metaJson = JSON.stringify(sessionMeta)
 
 		if (!state.loaded) {
 			records.push({ type: 'snapshot', session })
 			state.loaded = true
 			state.activeSegment = undefined
+			state.metaJson = metaJson
 			for (const agent of split) {
 				const pathKey = agentPathKey(agent.path)
 				state.agentMeta.set(pathKey, JSON.stringify(agent.meta))
@@ -436,37 +572,75 @@ export class SessionLogBackend {
 			}
 		} else {
 			this.appendDeltaRecords(state, split, sourceContent, records)
+			if (state.metaJson !== metaJson) {
+				records.push({ type: 'session-meta', meta: sessionMeta })
+			}
 		}
 
-		const metaJson = JSON.stringify(sessionWithoutSubagents(session))
 		if (state.loaded && records.length === 0 && state.metaJson === metaJson) {
-			return
+			const cacheReady = await (async () => {
+				try {
+					return (
+						(await this.adapter.exists(this.metaPath(id))) &&
+						(await this.adapter.exists(this.indexPath(id)))
+					)
+				} catch {
+					return false
+				}
+			})()
+			if (cacheReady) return
 		}
 
 		await mkdirsVault(this.vault, this.sessionDir(id))
-		await atomicReplaceContent(this.vault, this.metaPath(id), metaJson, 'text')
-		if (records.length > 0) {
-			if (!(await this.adapter.exists(this.logPath(id)))) {
-				await this.adapter.write(this.logPath(id), '')
+		try {
+			// The append/repair below is the commit point. Only after it lands do
+			// we advance generation and write the derived meta/index caches.
+			if (records.length > 0) {
+				const logPath = this.logPath(id)
+				const repair = state.pendingLogRepair
+				if (repair) {
+					const repaired =
+						repair.prefix +
+						[...repair.recovered, ...records]
+							.map(stringifySessionLogRecord)
+							.join('\n') +
+						'\n'
+					await atomicReplaceContent(this.vault, logPath, repaired, 'text')
+					state.pendingLogRepair = undefined
+				} else {
+					if (!(await this.adapter.exists(logPath))) {
+						await this.adapter.write(logPath, '')
+					}
+					await this.adapter.append(
+						logPath,
+						`${records.map(stringifySessionLogRecord).join('\n')}\n`,
+					)
+				}
+				state.generation += 1
 			}
-			await this.adapter.append(
-				this.logPath(id),
-				`${records.map(stringifySessionLogRecord).join('\n')}\n`,
+			await atomicReplaceContent(
+				this.vault,
+				this.metaPath(id),
+				metaJson,
+				'text',
 			)
-			state.generation += 1
-		}
-		state.metaJson = metaJson
-		await this.writeIndexFile(
-			id,
-			state.generation,
-			typeof session.updatedAt === 'number' ? session.updatedAt : Date.now(),
-			split,
-			state.activeSegment,
-		)
-
-		const compactionBytes = this.options.compactionBytes
-		if (compactionBytes && (await this.getLogSize(id)) > compactionBytes) {
-			await this.compactSession(id, session)
+			state.metaJson = metaJson
+			await this.writeIndexFile(
+				id,
+				state.generation,
+				typeof session.updatedAt === 'number' ? session.updatedAt : Date.now(),
+				split,
+				state.activeSegment,
+			)
+			const compactionBytes = this.options.compactionBytes
+			if (compactionBytes && (await this.getLogSize(id)) > compactionBytes) {
+				await this.compactSession(id, session)
+			}
+		} catch (error) {
+			// Persistence is the commit point: never leave in-memory state ahead
+			// of disk. The next write reloads from the committed prefix.
+			this.sessions.delete(id)
+			throw error
 		}
 	}
 
@@ -479,6 +653,145 @@ export class SessionLogBackend {
 		}
 	}
 
+	private async listSegmentEntries(
+		id: string,
+	): Promise<Array<{ file: string; name: string; generation: number }>> {
+		try {
+			const listed = await this.adapter.list(
+				normalizePath(`${this.sessionDir(id)}/seg`),
+			)
+			return listed.files.flatMap((file) => {
+				const name = normalizePath(file).split('/').pop() ?? ''
+				const match = /^(\d+)-(\d+)\.json$/.exec(name)
+				return match ? [{ file, name, generation: Number(match[1]) }] : []
+			})
+		} catch {
+			return []
+		}
+	}
+
+	private async promoteSessionTemps(id: string): Promise<void> {
+		await this.promoteTempsInDirectory(this.sessionDir(id))
+		await this.promoteTempsInDirectory(
+			normalizePath(`${this.sessionDir(id)}/seg`),
+		)
+	}
+
+	private async promoteTempsInDirectory(directory: string): Promise<void> {
+		let listed: { files: string[] }
+		try {
+			listed = await this.adapter.list(directory)
+		} catch {
+			return
+		}
+		for (const file of listed.files) {
+			const normalizedFile = normalizePath(file)
+			const slash = normalizedFile.lastIndexOf('/')
+			const parent = slash >= 0 ? normalizedFile.slice(0, slash) : ''
+			if (parent !== directory) continue
+			const name = normalizedFile.slice(slash + 1)
+			const tempMarker = name.lastIndexOf(ATOMIC_TEMP_MARKER)
+			const backupMarker = name.lastIndexOf(ATOMIC_BACKUP_MARKER)
+			if (tempMarker > 0) {
+				await this.recoverAtomicArtifact(directory, name, tempMarker)
+			} else if (backupMarker > 0) {
+				await this.recoverBackupArtifact(directory, name, backupMarker)
+			}
+		}
+	}
+
+	private async recoverAtomicArtifact(
+		directory: string,
+		name: string,
+		markerIndex: number,
+	): Promise<void> {
+		const targetName = name.slice(0, markerIndex)
+		if (!targetName) return
+		const file = normalizePath(`${directory}/${name}`)
+		const targetPath = normalizePath(`${directory}/${targetName}`)
+		try {
+			const tempText = await readLocalText(this.vault, file)
+			const targetExists = await this.adapter.exists(targetPath)
+			if (!targetExists) {
+				// A complete temp that never made it to the target is the best
+				// surviving copy; promote it.
+				JSON.parse(tempText)
+				await this.adapter.rename(file, targetPath)
+				return
+			}
+			const targetText = await readLocalText(this.vault, targetPath)
+			const targetValid = isParseableJson(targetText)
+			if (tempText.length === 0) {
+				// Crash before the temp body was written; it can never be
+				// installed and would otherwise accumulate forever.
+				await this.adapter.remove(file)
+				return
+			}
+			const tempValid = isParseableJson(tempText)
+			if (targetValid || !tempValid) {
+				// Target is published/usable (or neither copy parses): keep the
+				// target and drop the stale sibling.
+				await this.adapter.remove(file)
+				return
+			}
+			// Target exists but is corrupt while the temp parses: prefer the temp.
+			await this.adapter.write(targetPath, tempText)
+			await this.adapter.remove(file)
+		} catch {
+			/* Leave incomplete/corrupt artifacts for diagnostics. */
+		}
+	}
+
+	private async recoverBackupArtifact(
+		directory: string,
+		name: string,
+		markerIndex: number,
+	): Promise<void> {
+		const targetName = name.slice(0, markerIndex)
+		if (!targetName) return
+		const file = normalizePath(`${directory}/${name}`)
+		const targetPath = normalizePath(`${directory}/${targetName}`)
+		try {
+			const backupText = await readLocalText(this.vault, file)
+			if (backupText.length === 0) {
+				await this.adapter.remove(file)
+				return
+			}
+			const targetExists = await this.adapter.exists(targetPath)
+			if (!targetExists) {
+				JSON.parse(backupText)
+				await this.adapter.rename(file, targetPath)
+				return
+			}
+			const targetText = await readLocalText(this.vault, targetPath)
+			const targetValid = isParseableJson(targetText)
+			const backupValid = isParseableJson(backupText)
+			if (targetValid || !backupValid) {
+				await this.adapter.remove(file)
+				return
+			}
+			await this.adapter.write(targetPath, backupText)
+			await this.adapter.remove(file)
+		} catch {
+			/* Leave incomplete/corrupt artifacts for diagnostics. */
+		}
+	}
+
+	/** Startup sweep: promote complete atomic temp files into their targets. */
+	async recoverPendingTemps(): Promise<void> {
+		let listed: { folders: string[] }
+		try {
+			listed = await this.adapter.list(this.options.sessionsDir)
+		} catch {
+			return
+		}
+		for (const folder of listed.folders) {
+			const id = normalizePath(folder).split('/').pop() ?? ''
+			if (!id) continue
+			await this.promoteSessionTemps(id)
+		}
+	}
+
 	async compactSession(id: string, session: JsonRecord): Promise<void> {
 		const state = await this.loadState(id)
 		const split = splitSessionSnapshot(session)
@@ -488,24 +801,29 @@ export class SessionLogBackend {
 			(total, agent) => total + agent.messages.length,
 			0,
 		)
-		const segmentName = `${String(state.generation + 1).padStart(4, '0')}-${String(
+		const segments = await this.listSegmentEntries(id)
+		const highestGeneration = segments.reduce(
+			(max, entry) => Math.max(max, entry.generation),
+			state.generation,
+		)
+		let segmentGeneration = highestGeneration + 1
+		let segmentName = `${String(segmentGeneration).padStart(4, '0')}-${String(
 			messageCount,
 		).padStart(4, '0')}.json`
+		while (
+			await this.adapter.exists(normalizePath(`${segDir}/${segmentName}`))
+		) {
+			segmentGeneration += 1
+			segmentName = `${String(segmentGeneration).padStart(4, '0')}-${String(
+				messageCount,
+			).padStart(4, '0')}.json`
+		}
 		await atomicReplaceContent(
 			this.vault,
 			normalizePath(`${segDir}/${segmentName}`),
 			JSON.stringify(session),
 			'text',
 		)
-		// Keep an empty log file so session existence checks and appends remain cheap.
-		try {
-			if (await this.adapter.exists(this.logPath(id))) {
-				await this.adapter.remove(this.logPath(id))
-			}
-		} catch {
-			/* Best effort. */
-		}
-		await this.adapter.write(this.logPath(id), '')
 		const metaJson = JSON.stringify(sessionWithoutSubagents(session))
 		const nextState: SessionState = {
 			loaded: true,
@@ -531,8 +849,9 @@ export class SessionLogBackend {
 				})
 			}
 		}
-		this.sessions.set(id, nextState)
 		await atomicReplaceContent(this.vault, this.metaPath(id), metaJson, 'text')
+		// Publish the new active segment before removing the old log; a crash
+		// between these steps leaves the old log available for replay.
 		await this.writeIndexFile(
 			id,
 			nextState.generation,
@@ -540,6 +859,16 @@ export class SessionLogBackend {
 			split,
 			segmentName,
 		)
+		this.sessions.set(id, nextState)
+		// Keep an empty log file so session existence checks and appends remain cheap.
+		try {
+			if (await this.adapter.exists(this.logPath(id))) {
+				await this.adapter.remove(this.logPath(id))
+			}
+		} catch {
+			/* Best effort: index already points at the segment. */
+		}
+		await this.adapter.write(this.logPath(id), '')
 	}
 
 	async deleteSessionFile(id: string): Promise<void> {
@@ -637,6 +966,7 @@ export class SessionLogBackend {
 	private async loadState(id: string): Promise<SessionState> {
 		const cached = this.sessions.get(id)
 		if (cached?.loaded) return cached
+		await this.promoteSessionTemps(id)
 		const state: SessionState = cached ?? {
 			loaded: false,
 			generation: 0,
@@ -656,14 +986,25 @@ export class SessionLogBackend {
 				() => null,
 			)
 			if (text?.trim()) {
-				for (const record of parseLogLines(text)) {
+				const scan = scanSessionLog(text)
+				for (const record of scan.records) {
 					applyRecordToState(state, record)
+				}
+				for (const record of scan.recoveredTail) {
+					applyRecordToState(state, record)
+				}
+				if (scan.tornTail) {
+					state.pendingLogRepair = {
+						prefix: text.slice(0, scan.committedLength),
+						recovered: scan.recoveredTail,
+					}
 				}
 			} else if (text === null && !segment) {
 				throw new Error(`Session log not found: ${this.logPath(id)}`)
 			}
 			state.loaded = true
-		} catch {
+		} catch (error) {
+			if (error instanceof SessionLogCorruptionError) throw error
 			state.loaded = false
 		}
 		this.sessions.set(id, state)
@@ -734,5 +1075,4 @@ export class SessionLogBackend {
 			return null
 		}
 	}
-
 }

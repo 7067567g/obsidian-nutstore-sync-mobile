@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ChatSession, LegacyChatSession } from '~/ai/chat/domain'
 import { createEmptyMasterAgent } from '~/ai/chat/messages/ui-message'
 import { normalizeRehydratedExecution } from '~/ai/chat/session/rehydration-execution'
+import { TOOL_OUTCOME_UNKNOWN } from '~/ai/chat/tool-outcome'
 import {
 	migrateChatSession,
 	normalizeLegacySession,
@@ -86,6 +87,7 @@ describe('chat session persistence', () => {
 
 	it('cleans incomplete execution state from every agent on rehydrate', () => {
 		const master = createEmptyMasterAgent(1)
+		master.toolTimings['neutral-call'] = { startedAt: 10 }
 		master.timeline.push({
 			id: 'incomplete-tool',
 			role: 'assistant',
@@ -178,8 +180,25 @@ describe('chat session persistence', () => {
 			[],
 			[],
 		])
-		expect(master.timeline).toEqual([])
-		expect(completed.timeline).toEqual([])
+		expect(master.timeline).toHaveLength(1)
+		expect(master.timeline[0].parts[0]).toMatchObject({
+			type: 'dynamic-tool',
+			toolCallId: 'neutral-call',
+			state: 'output-error',
+		})
+		expect(
+			(master.timeline[0].parts[0] as { errorText: string }).errorText,
+		).toContain(TOOL_OUTCOME_UNKNOWN)
+		expect(completed.timeline).toHaveLength(1)
+		expect(completed.timeline[0].parts[0]).toMatchObject({
+			type: 'dynamic-tool',
+			toolCallId: 'neutral-child-call',
+			state: 'output-error',
+		})
+		expect(master.toolTimings['neutral-call'].finishedAt).toBeTypeOf('number')
+		expect(master.toolTimings['neutral-call'].outcome).toBe(
+			TOOL_OUTCOME_UNKNOWN,
+		)
 	})
 
 	it('captures an isolated V2 UIMessage snapshot', async () => {

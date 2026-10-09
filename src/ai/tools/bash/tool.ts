@@ -21,6 +21,7 @@ import {
 	updateSettingsDep,
 } from '~/ai/tools/tool-context'
 import i18n from '~/i18n'
+import { perfMetrics } from '~/diagnostics/perf-metrics'
 import { booleanValue, textValue } from '../shared'
 
 const MAX_INLINE_BASH_OUTPUT_CHARS = 20 * 1024
@@ -65,7 +66,7 @@ export const bashTool = tool({
 		updateSettings: updateSettingsDep,
 	}),
 	outputSchema: z.string(),
-	execute: async (params, { context, toolCallId }) => {
+	execute: async (params, { context, toolCallId, abortSignal }) => {
 		const {
 			app,
 			fileSystemManager,
@@ -82,10 +83,15 @@ export const bashTool = tool({
 			)
 		}
 
+		const timeoutMs = getSettingsSnapshot?.()?.ai?.toolTimeoutMs
 		const result = await execVaultBash(app, params.script, {
 			cwd,
 			stdin: params.stdin,
 			rawScript: params.rawScript,
+			abortSignal,
+			timeoutMs,
+			heartbeatIntervalMs: 2000,
+			onHeartbeat: () => perfMetrics.recordBridgeCall('bash.heartbeat'),
 			permissionGuard: withPermissionPurpose(permissionGuard, params.purpose),
 			onRead: readTracker?.markRead.bind(readTracker),
 			getSettingsSnapshot,

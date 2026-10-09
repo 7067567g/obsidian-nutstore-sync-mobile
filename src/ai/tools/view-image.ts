@@ -35,6 +35,20 @@ function isViewableImagePath(path: string) {
 	return path.startsWith('/') && path !== '/'
 }
 
+/** Hard byte ceiling before decoding; larger images belong on desktop MCP. */
+export const MAX_VIEW_IMAGE_BYTES = 20 * 1024 * 1024
+
+export function assertViewImageSize(size: number) {
+	if (size <= MAX_VIEW_IMAGE_BYTES) return
+	throw new Error(
+		'Image is too large for mobile view_image (' +
+			size +
+			' bytes, limit ' +
+			MAX_VIEW_IMAGE_BYTES +
+			'). Use desktop MCP for large images.',
+	)
+}
+
 function resolveImagePath(path: string) {
 	return path.startsWith('/')
 		? pathPosix.normalize(path)
@@ -93,6 +107,8 @@ export const viewImageTool = tool({
 		})
 		let data: Uint8Array
 		try {
+			const stat = await fs.stat(normalizedPath)
+			assertViewImageSize(stat.size)
 			data = await fs.readFileBuffer(normalizedPath)
 		} catch (error) {
 			if (error instanceof Error && error.message.includes('ENOENT')) {

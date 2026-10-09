@@ -114,4 +114,26 @@ describe('SessionWriteQueue', () => {
 
 		expect(write).not.toHaveBeenCalled()
 	})
+	it('never runs two writes concurrently', async () => {
+		let active = 0
+		let maxActive = 0
+		const writes: string[] = []
+		const queue = new SessionWriteQueue(async (value) => {
+			active += 1
+			maxActive = Math.max(maxActive, active)
+			await Promise.resolve()
+			writes.push(value.session.id)
+			active -= 1
+		}, 200)
+
+		const first = queue.schedule(task('first'))
+		const firstFlush = queue.flush()
+		const second = queue.schedule(task('second'))
+		const secondFlush = queue.flush()
+
+		await Promise.all([first, firstFlush, second, secondFlush])
+
+		expect(maxActive).toBe(1)
+		expect(writes).toEqual(['first', 'second'])
+	})
 })

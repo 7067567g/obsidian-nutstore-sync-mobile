@@ -2,6 +2,9 @@ import { normalizePath, Vault } from 'obsidian'
 import { dirname } from 'path-browserify'
 import { mkdirsVault } from './mkdirs-vault'
 
+export const ATOMIC_TEMP_MARKER = '.nutstore-sync-temp-'
+export const ATOMIC_BACKUP_MARKER = '.nutstore-sync-backup-'
+
 function siblingPath(normalizedPath: string, suffix: string) {
 	const directory = dirname(normalizedPath)
 	const name = normalizedPath.slice(
@@ -55,7 +58,7 @@ export async function atomicReplaceFromTemp(
 	await mkdirsVault(vault, dirname(normalizedTarget))
 	const backupPath = siblingPath(
 		normalizedTarget,
-		`.nutstore-sync-backup-${uniqueSuffix()}`,
+		`${ATOMIC_BACKUP_MARKER}${uniqueSuffix()}`,
 	)
 	let backupCreated = false
 	let installed = false
@@ -103,7 +106,7 @@ export async function atomicReplaceContent(
 	await mkdirsVault(vault, dirname(normalizedTarget))
 	const tempPath = siblingPath(
 		normalizedTarget,
-		`.nutstore-sync-temp-${uniqueSuffix()}`,
+		`${ATOMIC_TEMP_MARKER}${uniqueSuffix()}`,
 	)
 	try {
 		if (kind === 'binary') {

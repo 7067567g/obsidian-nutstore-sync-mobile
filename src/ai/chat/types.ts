@@ -14,6 +14,7 @@ import type {
 
 import { z } from 'zod/mini'
 import type { UserContextItem } from '~/ai/chat/context/user-context'
+import type { ToolOutcome } from './tool-outcome'
 
 type AssistantContentArray = Extract<
 	AssistantModelMessage['content'],
@@ -200,6 +201,11 @@ export type ChatAgentStatus =
 export interface ToolTiming {
 	startedAt: number
 	finishedAt?: number
+	/**
+	 * Normal completion/error, or recovery classification (`unknown` /
+	 * `not-started`) when the process was interrupted before a durable result.
+	 */
+	outcome?: ToolOutcome
 }
 
 export interface ChatAgentState {

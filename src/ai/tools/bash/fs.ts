@@ -45,6 +45,62 @@ const DIR_MODE = 0o755
 type ReadFileOptions = { encoding?: BufferEncoding | null }
 type WriteFileOptions = { encoding?: BufferEncoding }
 
+export const BASH_DEFAULT_MAX_WRITE_BYTES = 64 * 1024 * 1024
+export const BASH_DEFAULT_MAX_WRITE_OPERATIONS = 2000
+export const BASH_DEFAULT_MAX_RECURSION_DEPTH = 32
+
+export interface BashResourceLimits {
+	maxWriteBytes?: number
+	maxWriteOperations?: number
+	maxRecursionDepth?: number
+}
+
+/** Per-command write-volume/recursion budget for the virtual filesystem. */
+export class BashResourceBudget {
+	private writeBytes = 0
+	private writeOperations = 0
+
+	constructor(private readonly limits: BashResourceLimits = {}) {}
+
+	recordWrite(bytes: number) {
+		const maxBytes = this.limits.maxWriteBytes ?? BASH_DEFAULT_MAX_WRITE_BYTES
+		const maxOperations =
+			this.limits.maxWriteOperations ?? BASH_DEFAULT_MAX_WRITE_OPERATIONS
+		if (this.writeOperations + 1 > maxOperations) {
+			throw new Error(
+				'TOOL_RESOURCE_EXCEEDED: bash write operation limit reached (' +
+					maxOperations +
+					' operation(s)); narrow the command or split it into smaller steps.',
+			)
+		}
+		if (this.writeBytes + bytes > maxBytes) {
+			throw new Error(
+				'TOOL_RESOURCE_EXCEEDED: bash write volume exceeds ' +
+					maxBytes +
+					' bytes; narrow the command or use a smaller batch.',
+			)
+		}
+		this.writeOperations += 1
+		this.writeBytes += bytes
+	}
+
+	checkRecursionDepth(depth: number) {
+		const maxDepth =
+			this.limits.maxRecursionDepth ?? BASH_DEFAULT_MAX_RECURSION_DEPTH
+		if (depth > maxDepth) {
+			throw new Error(
+				'TOOL_RESOURCE_EXCEEDED: bash recursion depth exceeds ' +
+					maxDepth +
+					'; narrow the recursive command.',
+			)
+		}
+	}
+}
+
+export function createBashResourceBudget(limits?: BashResourceLimits) {
+	return new BashResourceBudget(limits)
+}
+
 function getEncoding(
 	options?: ReadFileOptions | WriteFileOptions | BufferEncoding | null,
 ) {
@@ -147,7 +203,10 @@ async function copyRecursive(
 	src: string,
 	dest: string,
 	options?: CpOptions,
+	budget?: BashResourceBudget,
+	depth = 0,
 ) {
+	budget?.checkRecursionDepth(depth)
 	const sourceStat = await fs.stat(src)
 	if (sourceStat.isDirectory) {
 		if (!options?.recursive) {
@@ -160,6 +219,8 @@ async function copyRecursive(
 				joinVirtualPath(src, entry),
 				joinVirtualPath(dest, entry),
 				options,
+				budget,
+				depth + 1,
 			)
 		}
 		return
@@ -308,6 +369,7 @@ export class ObsidianVaultFs implements IFileSystem {
 		initialPaths: string[] | VaultPathIndex = [],
 		private readonly permissionGuard?: PermissionGuard,
 		private readonly onRead?: (vaultPath: string) => void,
+		private readonly budget?: BashResourceBudget,
 	) {
 		this.pathIndex = Array.isArray(initialPaths)
 			? new MutableVaultPathIndex(initialPaths)
@@ -472,6 +534,18 @@ export class ObsidianVaultFs implements IFileSystem {
 		)
 	}
 
+	private async persistEncoded(path: string, encoded: Uint8Array) {
+		await this.mkdir(pathPosix.dirname(ensureNotEscapingRoot(path)), {
+			recursive: true,
+		})
+		await writeLocalBinary(
+			this.vault,
+			this.toVaultPath(path),
+			toArrayBuffer(encoded),
+		)
+		this.recordPath(path)
+	}
+
 	async writeFile(
 		path: string,
 		content: FileContent,
@@ -479,16 +553,9 @@ export class ObsidianVaultFs implements IFileSystem {
 	): Promise<void> {
 		await this.checkPermission({ kind: 'write', path })
 		await this.withBatch(async () => {
-			await this.mkdir(pathPosix.dirname(ensureNotEscapingRoot(path)), {
-				recursive: true,
-			})
 			const encoded = encodeContent(content, options)
-			await writeLocalBinary(
-				this.vault,
-				this.toVaultPath(path),
-				toArrayBuffer(encoded),
-			)
-			this.recordPath(path)
+			this.budget?.recordWrite(encoded.byteLength)
+			await this.persistEncoded(path, encoded)
 		})
 	}
 
@@ -500,13 +567,14 @@ export class ObsidianVaultFs implements IFileSystem {
 		await this.checkPermission({ kind: 'write', path })
 		await this.withBatch(async () => {
 			const encoded = encodeContent(content, options)
+			this.budget?.recordWrite(encoded.byteLength)
 			const existing = (await this.exists(path))
 				? await this.readInternal(path)
 				: (new Uint8Array(0) as Uint8Array)
 			const merged = new Uint8Array(existing.length + encoded.length)
 			merged.set(existing)
 			merged.set(encoded, existing.length)
-			await this.writeFile(path, merged)
+			await this.persistEncoded(path, merged)
 		})
 	}
 
@@ -646,47 +714,76 @@ export class ObsidianVaultFs implements IFileSystem {
 
 	async cp(src: string, dest: string, options?: CpOptions): Promise<void> {
 		await this.checkPermission({ kind: 'copy', src, dest })
-		await this.withBatch(() => copyRecursive(this, src, dest, options))
+		await this.withBatch(() =>
+			copyRecursive(this, src, dest, options, this.budget),
+		)
 	}
 
 	async mv(src: string, dest: string): Promise<void> {
 		await this.checkPermission({ kind: 'move', src, dest })
 		await this.withBatch(async () => {
-			if (!(await this.exists(src))) {
+			const normalizedSource = ensureNotEscapingRoot(src)
+			const normalizedDest = ensureNotEscapingRoot(dest)
+			if (normalizedSource === normalizedDest) return
+			if (!(await this.exists(normalizedSource))) {
 				throw new Error(`ENOENT: no such file or directory, move '${src}'`)
 			}
-			await this.mkdir(pathPosix.dirname(ensureNotEscapingRoot(dest)), {
+			await this.mkdir(pathPosix.dirname(normalizedDest), {
 				recursive: true,
 			})
+			if (await this.exists(normalizedDest)) {
+				const sourceStat = await this.stat(normalizedSource)
+				const destinationStat = await this.stat(normalizedDest)
+				if (sourceStat.isDirectory || destinationStat.isDirectory) {
+					throw new Error(
+						destinationStat.isDirectory
+							? `ENOTEMPTY: cannot overwrite directory '${dest}'`
+							: `EISDIR: cannot overwrite '${dest}' with '${src}'`,
+					)
+				}
+				const content = await this.readInternal(normalizedSource)
+				await this.writeFile(normalizedDest, content)
+				await this.rm(normalizedSource, { recursive: true })
+				this.forgetPath(normalizedSource)
+				this.recordPath(normalizedDest)
+				return
+			}
 			const sourceIsAdapterPath = isAdapterPath(
 				this.vault,
-				this.toVaultPath(src),
+				this.toVaultPath(normalizedSource),
 			)
 			const destinationIsAdapterPath = isAdapterPath(
 				this.vault,
-				this.toVaultPath(dest),
+				this.toVaultPath(normalizedDest),
 			)
 			if (sourceIsAdapterPath !== destinationIsAdapterPath) {
-				await copyRecursive(this, src, dest, { recursive: true })
-				await this.rm(src, { recursive: true })
+				await copyRecursive(
+					this,
+					normalizedSource,
+					normalizedDest,
+					{ recursive: true },
+					this.budget,
+				)
+				await this.rm(normalizedSource, { recursive: true })
 			} else if (sourceIsAdapterPath) {
 				perfMetrics.recordBridgeCall('bash.adapter.rename')
 				await this.vault.adapter.rename(
-					this.toVaultPath(src),
-					this.toVaultPath(dest),
+					this.toVaultPath(normalizedSource),
+					this.toVaultPath(normalizedDest),
 				)
 			} else {
-				const target = this.vault.getAbstractFileByPath(this.toVaultPath(src))
+				const target = this.vault.getAbstractFileByPath(
+					this.toVaultPath(normalizedSource),
+				)
 				if (!target) {
 					throw new Error(`ENOENT: no such file or directory, move '${src}'`)
 				}
-				await this.vault.rename(target, this.toVaultPath(dest))
+				await this.vault.rename(target, this.toVaultPath(normalizedDest))
 			}
-			this.forgetPath(src)
-			this.recordPath(dest)
+			this.forgetPath(normalizedSource)
+			this.recordPath(normalizedDest)
 		})
 	}
-
 	resolvePath(base: string, path: string): string {
 		return ensureNotEscapingRoot(pathPosix.resolve(base || '/', path))
 	}

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+	createEmptyMasterAgent,
+	hasIncompleteToolCalls,
+	isTerminalToolPart,
 	modelMessageToUIMessage,
 	selectContextTimeline,
 	uiMessagesToModelMessages,
@@ -197,5 +200,39 @@ describe('UIMessage model round-trip', () => {
 				],
 			},
 		])
+	})
+})
+
+describe('tool boundary terminality', () => {
+	it('keeps an incomplete tool call from becoming a safe boundary', () => {
+		const agent = createEmptyMasterAgent(1)
+		agent.timeline.push({
+			id: 'tool-message',
+			role: 'assistant',
+			metadata: { createdAt: 1 },
+			parts: [
+				{
+					type: 'dynamic-tool',
+					toolName: 'bash',
+					toolCallId: 'call-1',
+					state: 'input-available',
+					input: { command: 'echo hi' },
+				},
+			],
+		})
+		const pending = agent.timeline[0].parts[0]
+		expect(isTerminalToolPart(pending as never)).toBe(false)
+		expect(hasIncompleteToolCalls(agent)).toBe(true)
+
+		agent.timeline[0].parts[0] = {
+			type: 'dynamic-tool',
+			toolName: 'bash',
+			toolCallId: 'call-1',
+			state: 'output-error',
+			input: { command: 'echo hi' },
+			errorText: 'TOOL_OUTCOME_UNKNOWN',
+		}
+		expect(isTerminalToolPart(agent.timeline[0].parts[0] as never)).toBe(true)
+		expect(hasIncompleteToolCalls(agent)).toBe(false)
 	})
 })

@@ -32,6 +32,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.30.0
         version: 1.30.0(zod@4.3.6)
+      '@noble/hashes':
+        specifier: 2.4.0
+        version: 2.4.0
       '@nutstore/sso-js':
         specifier: ^0.0.9
         version: 0.0.9
@@ -1052,6 +1055,10 @@ packages:
 
   '@nodable/entities@3.0.0':
     resolution: {integrity: sha512-8L9xFeTYKhm49xfIypoe2W5wV1m/3Z58kT+7kR9A8OyFxcPduI4VmxaUMQyKYrRjUoLLSXv6EKKID5Tvj9cUVw==}
+
+  '@noble/hashes@2.4.0':
+    resolution: {integrity: sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA==}
+    engines: {node: '>= 20.19.0'}
 
   '@nutstore/sso-js@0.0.9':
     resolution: {integrity: sha512-2yPVymjoqvYShUIJTv/McZWnRJ0RuRAw0rX8NjPmaXbRLoodbpTd2wgzLGY/UnaVCJ4d1xMIV/TzsZ2clSuuDg==, tarball: https://npm.pkg.github.com/download/@nutstore/sso-js/0.0.9/95d4a8e1fa155d3451efc594efaa9c25d55bd563}
@@ -5833,6 +5840,8 @@ snapshots:
     optional: true
 
   '@nodable/entities@3.0.0': {}
+
+  '@noble/hashes@2.4.0': {}
 
   '@nutstore/sso-js@0.0.9': {}
 

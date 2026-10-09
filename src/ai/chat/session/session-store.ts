@@ -102,6 +102,7 @@ export class SessionStore {
 	}
 
 	async recoverPendingWrites() {
+		await this.backend.recoverPendingTemps()
 		if (!this.recovery) return
 		await this.recovery.recoverPending(async (id) => {
 			await this.backend.readSessionFile(id, { hydrateOperations: false })
@@ -597,12 +598,15 @@ export class SessionStore {
 							const startedAt = normalizeTimestamp(timing?.startedAt)
 							if (startedAt === undefined) return []
 							const finishedAt = normalizeTimestamp(timing.finishedAt)
+							const outcome =
+								typeof timing?.outcome === 'string' ? timing.outcome : undefined
 							return [
 								[
 									toolCallId,
 									{
 										startedAt,
 										...(finishedAt === undefined ? {} : { finishedAt }),
+										...(outcome ? { outcome } : {}),
 									},
 								],
 							]
