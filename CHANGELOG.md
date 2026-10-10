@@ -2,7 +2,7 @@
 
 本项目的所有重要更改都将记录在此文件中。All notable changes to this project will be documented in this file.
 
-## [1.5.5-personal] - 2026-10-10
+## [1.5.5-mobile] - 2026-10-10
 
 - 会话检查点持久化屏障：副作用工具 body 前落盘，强杀恢复为 `TOOL_OUTCOME_UNKNOWN` 且不自动重试。
 - 会话恢复：torn-tail 扫描/修复，atomic temp/backup 启动清理或恢复，activeSegment 先发布。

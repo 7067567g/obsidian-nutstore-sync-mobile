@@ -31,6 +31,6 @@ styles.css
 main.js
 /.cache
 
-# personal release/build artifacts
+# private build/release artifacts
 main.js.sha256
 release/
