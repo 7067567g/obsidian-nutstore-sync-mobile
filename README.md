@@ -1,8 +1,8 @@
-<h1 align="center">Nutstore Sync Mobile — 私人改动自用构建 / Private Modifications Build</h1>
+<h1 align="center">Nutstore Sync Mobile — 移动端自定义构建 / Mobile Custom Build</h1>
 
 <p align="center">
-  <strong>基于上游的私人改动自用构建，不是原作者的官方仓库。</strong><br>
-  <em>Private modifications build based on upstream. Not the original project.</em>
+  <strong>基于上游的移动端自定义构建，不是原作者的官方仓库。</strong><br>
+  <em>Mobile custom build based on upstream. Not the original project.</em>
 </p>
 
 <p align="center">
@@ -11,11 +11,11 @@
 </p>
 
 > [!IMPORTANT]
-> **本仓库是维护者自己的私人改动自用构建；与原作者、坚果云官方均无隶属或背书关系。**
+> **本仓库是维护者基于上游维护的移动端自定义构建；与原作者、坚果云官方均无隶属或背书关系。**
 > 如果你要安装或使用官方版本，请前往 Obsidian 社区插件或原仓库：
 > <https://github.com/nutstore/obsidian-nutstore-sync>
 >
-> **This repository is the maintainer’s own private modifications build based on upstream, and is not affiliated with, maintained by, or endorsed by the original authors or Nutstore.**
+> **This repository is a mobile custom build maintained by its author based on upstream, and is not affiliated with, maintained by, or endorsed by the original authors or Nutstore.**
 > For the official plugin, please use the original repository:
 > <https://github.com/nutstore/obsidian-nutstore-sync>
 
@@ -24,9 +24,9 @@
 | 原仓库 / Upstream | [nutstore/obsidian-nutstore-sync](https://github.com/nutstore/obsidian-nutstore-sync) |
 | 本仓库 / This fork | [7067567g/obsidian-nutstore-sync-mobile](https://github.com/7067567g/obsidian-nutstore-sync-mobile) |
 | 上游基线 / Upstream base | `79d35b4` |
-| 私人改动起点 / Modifications start | `personal-20260911`（历史起点） |
+| 自定义改动起点 / Modifications start | `personal-20260911`（历史起点） |
 | 当前版本 / Current version | **1.5.5** |
-| 当前构建标签 / Current build tag | `mobile-20261010` |
+| 当前构建标签 / Current build tag | `v1.5.5-mobile.1` |
 | 许可证 / License | [AGPL-3.0](LICENSE)，与上游相同 / same as upstream |
 
 ### 这版主要改了什么（1.5.5 / mobile stability）
@@ -50,7 +50,7 @@
   ```
   产物位于 `release/nutstore-sync-<version>/`（含 `main.js`、`manifest.json`、`styles.css`、`SHA256SUMS.txt`）。
 - 手机安装：把 `main.js`、`manifest.json`、`styles.css` 放入 Obsidian 插件目录 `.obsidian/plugins/nutstore-sync/`。
-- 其他修改记录见 [`PRIVATE_MODIFICATIONS.md`](PRIVATE_MODIFICATIONS.md)。
+- 其他修改记录见 [`MODIFICATIONS.md`](MODIFICATIONS.md)。
 
 <details>
 <summary>English summary</summary>

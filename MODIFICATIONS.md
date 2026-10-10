@@ -1,22 +1,22 @@
-# Private Modifications Notice
+# Modifications Notice
 
-This repository is the maintainer's **own private modifications build** based on
+This repository is a **mobile custom build** based on
 [`nutstore/obsidian-nutstore-sync`](https://github.com/nutstore/obsidian-nutstore-sync).
 
 The current version is **1.5.5**; all differences from upstream in this repository
-are the maintainer's private modifications, maintained as a single line of work.
+are the maintainer's own custom modifications, maintained as a single line of work.
 The original upstream project is a general-purpose Obsidian sync plugin; this
 repository is tuned for the maintainer's own daily mobile / Obsidian usage.
 
 - Upstream base: `79d35b4e8b47ac43d3531ceb888a722ee942dc5e`
 - Current version: `1.5.5`
-- Build tag: `mobile-20261010`
+- Build tag: `v1.5.5-mobile.1`
 - License: GNU Affero General Public License v3.0 only, see `LICENSE`
 - The original copyright and license notices are preserved.
 
 ## What this repository contains
 
-Private modifications include, but are not limited to:
+Custom modifications include, but are not limited to:
 
 - session storage cold-read durability and recovery;
 - native vault tools (`vault_stat`, `vault_json`, `vault_hash`,
