@@ -9,8 +9,12 @@ import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } fr
 import { execFileSync } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 
-const root = resolve(new URL('..', import.meta.url).pathname)
+// `fileURLToPath` decodes percent-encoded path segments; `new URL().pathname`
+// leaves them encoded and breaks `process.chdir` on non-ASCII paths such as a
+// `20-工作区` parent directory.
+const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 process.chdir(root)
 
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))

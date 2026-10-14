@@ -41,10 +41,10 @@ expect(decide(path, isDir)).toBe(false)
 })
 
 it.each([
-['说明.md', false],
-['知识库关系图谱.md', false],
-['ChatBox 手册.md', false],
-['知识库关系图谱.canvas', false],
+'说明.md',
+'知识库关系图谱.md',
+'ChatBox 手册.md',
+'知识库关系图谱.canvas',
 ] as const)('root navigation notes are included: %s', (path) => {
 expect(decide(path)).toBe(true)
 })

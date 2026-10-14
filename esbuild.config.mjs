@@ -29,12 +29,17 @@ const buildOptions = {
 		'@lezer/lr',
 	],
 	define: {
+		// Fall back to the same public defaults used by `scripts/release-local.mjs`,
+		// so `pnpm build` works standalone. `JSON.stringify(undefined)` yields
+		// `undefined` (not a string), which esbuild rejects for a define value.
 		'process.env.NS_NSDAV_ENDPOINT': JSON.stringify(
-			process.env.NS_NSDAV_ENDPOINT,
+			process.env.NS_NSDAV_ENDPOINT || 'https://dav.jianguoyun.com/nsdav',
 		),
-		'process.env.NS_DAV_ENDPOINT': JSON.stringify(process.env.NS_DAV_ENDPOINT),
+		'process.env.NS_DAV_ENDPOINT': JSON.stringify(
+			process.env.NS_DAV_ENDPOINT || 'https://dav.jianguoyun.com/dav',
+		),
 		'process.env.LLM_GATEWAY_CLIENT_ID': JSON.stringify(
-			process.env.LLM_GATEWAY_CLIENT_ID || '',
+			process.env.LLM_GATEWAY_CLIENT_ID || 'dc_obsidian_dp0gymrn',
 		),
 		'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || ''),
 		'process.env.PLUGIN_VERSION': JSON.stringify(pkgJson.version),
