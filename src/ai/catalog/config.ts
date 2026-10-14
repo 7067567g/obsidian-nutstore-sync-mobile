@@ -33,6 +33,22 @@ function formatSchemaIssues(error: z.core.$ZodError): string {
 		.join('; ')
 }
 
+/**
+ * `cost` 含嵌套的 `context_over_200k`，必须整对象深拷贝；
+ * 否则创建出的模型配置会与来源对象（preset / 用户设置）共享同一引用，
+ * 任一方修改都会污染另一方。
+ */
+function cloneModelCost(cost: AIModelConfig['cost']): AIModelConfig['cost'] {
+	if (!cost) {
+		return undefined
+	}
+	const cloned: NonNullable<AIModelConfig['cost']> = { ...cost }
+	if (cost.context_over_200k) {
+		cloned.context_over_200k = { ...cost.context_over_200k }
+	}
+	return cloned
+}
+
 export function createModelConfig(
 	model: AIModelInput = {},
 	fallbackId = '',
@@ -56,12 +72,17 @@ export function createModelConfig(
 			output: [...modalities.output],
 		},
 		open_weights: model.open_weights ?? false,
-		cost: model.cost,
+		cost: cloneModelCost(model.cost),
 		limit: { ...(model.limit || DEFAULT_LIMIT) },
-		interleaved: model.interleaved,
+		interleaved:
+			typeof model.interleaved === 'object'
+				? { ...model.interleaved }
+				: model.interleaved,
 		provider: model.provider ? { ...model.provider } : undefined,
 		status: model.status,
-		experimental: model.experimental,
+		experimental: model.experimental
+			? { ...model.experimental }
+			: model.experimental,
 	}
 }
 

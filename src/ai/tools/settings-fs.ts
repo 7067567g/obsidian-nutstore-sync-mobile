@@ -135,6 +135,13 @@ export class SettingsFs implements IFileSystem {
 			this.input.getSettings(),
 			parsed.patch,
 		)
+		if (Object.keys(changes).length === 0) {
+			// A write that matches the current settings must stay a no-op: the
+			// virtual settings file is routinely rewritten whole (bash/apply_patch),
+			// and prompting for permission or persisting an empty patch would be a
+			// spurious side effect. Mirrors settings_patch's early return.
+			return
+		}
 		await this.input.permissionGuard?.({
 			type: 'settings',
 			settings: {

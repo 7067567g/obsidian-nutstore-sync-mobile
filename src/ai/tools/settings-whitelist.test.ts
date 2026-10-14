@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
 	applyNormalizedSettingsPatch,
+	getChangedSettingsPatch,
 	parseSettingsWhitelistJson,
 	serializeSettingsWhitelist,
 } from './settings-whitelist'
@@ -110,5 +111,32 @@ describe('settings whitelist model limits', () => {
 			},
 		])
 		expect(JSON.stringify(serialized)).not.toContain('secret')
+	})
+
+	it('round-trips model limits without inventing 0 for missing values', () => {
+		const settings = settingsFixture() as never as {
+			ai: {
+				providers: Record<
+					string,
+					{ models: Record<string, { limit: Record<string, number> }> }
+				>
+			}
+		}
+		// A model whose limit object omits `output` (custom provider models can).
+		delete settings.ai.providers.deepseek.models['deepseek-chat'].limit.output
+
+		const serialized = JSON.parse(serializeSettingsWhitelist(settings as never))
+		expect(serialized.aiModelLimits).toEqual([
+			{ providerId: 'deepseek', modelId: 'deepseek-chat', context: 256000 },
+		])
+
+		const parsed = parseSettingsWhitelistJson(serializeSettingsWhitelist(settings as never))
+		expect(parsed.ok).toBe(true)
+		if (!parsed.ok) return
+		// Reading then writing the same file must not report any change; a
+		// coerced `output: 0` used to look like an explicit limit change.
+		expect(
+			getChangedSettingsPatch(settings as never, parsed.patch),
+		).toEqual({})
 	})
 })

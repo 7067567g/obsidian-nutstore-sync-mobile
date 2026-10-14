@@ -543,7 +543,9 @@ export function serializeSettingsWhitelist(settings: NutstoreSettings): string {
 				disabled: rule.disabled === true ? true : undefined,
 			})),
 		},
-		skipLargeFiles: { maxSize: settings.skipLargeFiles?.maxSize },
+		...(settings.skipLargeFiles?.maxSize
+			? { skipLargeFiles: { maxSize: settings.skipLargeFiles.maxSize } }
+			: {}),
 		startupSyncDelaySeconds: settings.startupSyncDelaySeconds,
 		autoSyncIntervalSeconds: settings.autoSyncIntervalSeconds,
 		realtimeSync: settings.realtimeSync,
@@ -555,12 +557,22 @@ export function serializeSettingsWhitelist(settings: NutstoreSettings): string {
 		language: settings.language ?? '',
 		aiModelLimits: Object.entries(settings.ai?.providers ?? {}).flatMap(
 			([providerId, provider]) =>
-				Object.entries(provider.models ?? {}).map(([modelId, model]) => ({
-					providerId,
-					modelId,
-					context: model.limit?.context ?? 0,
-					output: model.limit?.output ?? 0,
-				})),
+				Object.entries(provider.models ?? {}).flatMap(([modelId, model]) => {
+					const limit = model.limit ?? {}
+					const entry: AIModelLimitWhitelistEntry = { providerId, modelId }
+					if (typeof limit.context === 'number') {
+						entry.context = limit.context
+					}
+					if (typeof limit.output === 'number') {
+						entry.output = limit.output
+					}
+					// Never coerce a missing limit to 0: a 0 read back would be
+					// treated as an explicit change and overwrite the model's real
+					// limit on the next write (read→write must stay idempotent).
+					return entry.context === undefined && entry.output === undefined
+						? []
+						: [entry]
+				}),
 		),
 	}
 	return `${JSON.stringify(file, null, 2)}\n`

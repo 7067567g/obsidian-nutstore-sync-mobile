@@ -1,12 +1,15 @@
 import { parse as bytesParse } from 'bytes-iec'
 import { hasInvalidChar } from '~/utils/has-invalid-char'
 import { isPluginSelfPath } from '~/utils/config-dir-rules'
-import { isSameTime } from '~/utils/is-same-time'
 import remotePathToAbsolute from '~/utils/remote-path-to-absolute'
 import { remotePathToLocalPath } from '~/utils/remote-path-to-local-path'
 import { hasFolderContentChanged } from '../core/has-folder-content-changed'
 import { areLooseEqualFiles } from '../core/loose-equality'
-import { getFileChanges, getRemoteFileChanged } from '../core/file-changes'
+import {
+	getFileChanges,
+	getLocalFileChanged,
+	getRemoteFileChanged,
+} from '../core/file-changes'
 import { shouldCreateCleanRecordTask } from '../core/record-cleanup'
 import { SkipReason } from '../tasks/skipped.task'
 import { BaseTask } from '../tasks/task.interface'
@@ -298,7 +301,7 @@ export async function twoWayDecider(
 					})
 					continue
 				}
-				const localChanged = !isSameTime(local.mtime, record.local.mtime)
+				const localChanged = await getLocalFileChanged(input, local, record)
 				if (localChanged) {
 					logger.debug({
 						reason: 'local file changed and remote file does not exist',

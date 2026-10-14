@@ -35,6 +35,7 @@ import {
 	resolveMarkdownSourcePath,
 } from './markdown-link-handler'
 import { mountChatbox } from '../components/solid-js'
+import { syncComponentLocale } from '../components/solid-js/i18n'
 
 export const CHATBOX_VIEW_TYPE = 'nutstore-sync-chatbox'
 
@@ -490,6 +491,7 @@ export default class ChatboxView extends ItemView {
 		this.unsub?.()
 		this.unsub = undefined
 		this.controller?.destroy()
+		syncComponentLocale(this.plugin.settings.language)
 		this.controller = mountChatbox(this.rootEl, this.getChatboxProps())
 		this.unsub = this.plugin.chatService.subscribe(() => {
 			this.controller?.update(this.getChatboxProps())

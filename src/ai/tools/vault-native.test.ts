@@ -72,6 +72,13 @@ describe('native vault tools', () => {
 		expect(result.text).toBe('2 | hello world')
 	})
 
+	it('reports an empty range instead of inverting it past EOF', async () => {
+		const { app } = createApp()
+		const result = await executeVaultRead(app, '/notes/a.md', 100, 10)
+		expect(result.header).toContain('no lines in range')
+		expect(result.text).toBe('')
+	})
+
 	it('greps visible vault files without browser-bash', async () => {
 		const { app } = createApp()
 		const result = await executeVaultGrep(app, '/notes', 'hello')

@@ -22,10 +22,33 @@ function toLocale(language: string): Locale {
 	}
 }
 
-const dict: ComponentDict = i18n.flatten(
-	messagesByLocale[
-		toLocale(typeof navigator === 'undefined' ? 'en' : navigator.language)
-	],
-)
+/**
+ * Resolves the locale for the Solid components (chatbox / WebDAV explorer).
+ * An explicit plugin language (`settings.language`) always wins; when it is
+ * unset we mirror `I18nService.update()` and fall back to the host language.
+ */
+function resolveLocale(language?: string): Locale {
+	if (language) return toLocale(language)
+	return toLocale(typeof navigator === 'undefined' ? 'en' : navigator.language)
+}
+
+function buildDict(locale: Locale): ComponentDict {
+	return i18n.flatten(messagesByLocale[locale])
+}
+
+let currentLocale: Locale = resolveLocale()
+let dict: ComponentDict = buildDict(currentLocale)
+
+/**
+ * Applies the plugin language setting to the component i18n. Must be called
+ * before mounting a Solid tree so the chatbox matches the settings UI instead
+ * of always following `navigator.language`.
+ */
+export function syncComponentLocale(language?: string): void {
+	const next = resolveLocale(language)
+	if (next === currentLocale) return
+	currentLocale = next
+	dict = buildDict(next)
+}
 
 export const t = i18n.translator(() => dict, i18n.resolveTemplate)

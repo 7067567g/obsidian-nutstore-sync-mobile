@@ -45,6 +45,30 @@ describe('ai config', () => {
 		expect(second.limit.context).toBe(0)
 	})
 
+	it('does not alias nested cost/interleaved/experimental from the source', () => {
+		const source = {
+			cost: {
+				input: 1,
+				output: 2,
+				context_over_200k: { input: 3, output: 4 },
+			},
+			interleaved: { field: 'reasoning_content' },
+			experimental: { vendor: 'example' },
+		}
+		const config = createModelConfig(source)
+
+		config.cost!.input = 999
+		config.cost!.context_over_200k!.output = 999
+		config.experimental!.vendor = 'changed'
+
+		expect(config.interleaved).not.toBe(source.interleaved)
+		expect(config.interleaved).toEqual({ field: 'reasoning_content' })
+		expect(source.cost.input).toBe(1)
+		expect(source.cost.context_over_200k.output).toBe(4)
+		expect(source.interleaved.field).toBe('reasoning_content')
+		expect(source.experimental.vendor).toBe('example')
+	})
+
 	it('sanitizes provider objects', () => {
 		const providers = sanitizeProviders({
 			'provider-1': {

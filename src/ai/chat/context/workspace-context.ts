@@ -74,13 +74,25 @@ function captureCurrentDateContext(date: Date): CurrentDateContext {
 	}
 }
 
+const CONNECTED_FILE_VIEW_TYPES = [
+	'markdown',
+	'canvas',
+	'pdf',
+	'image',
+	'video',
+	'audio',
+	'bases',
+] as const
+
 function getConnectedFilePath(leaf: WorkspaceLeaf): string | null {
 	const view = leaf.view as unknown as View
 	if (
 		!view?.file?.path ||
-		!(
-			view.getViewType() in
-			['markdown', 'canvas', 'pdf', 'image', 'video', 'audio', 'bases']
+		// NOTE: an earlier revision used `view.getViewType() in [...]`, which
+		// tests array *indices* rather than values and was therefore always
+		// false, dropping every open file from the workspace context.
+		!CONNECTED_FILE_VIEW_TYPES.includes(
+			view.getViewType() as (typeof CONNECTED_FILE_VIEW_TYPES)[number],
 		) ||
 		!view.containerEl?.isConnected
 	) {

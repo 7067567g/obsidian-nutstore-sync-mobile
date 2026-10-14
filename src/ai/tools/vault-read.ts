@@ -43,13 +43,20 @@ export async function executeVaultRead(
 	const lines = text.split('\n')
 	const start = clampInt(offset, 1, 1, Number.MAX_SAFE_INTEGER) - 1
 	const size = clampInt(limit, 400, 1, MAX_LINES)
-	const end = Math.min(lines.length, start + size)
-	const selected = lines.slice(start, end)
+	// Clamp a start beyond EOF so the reported range never inverts
+	// (e.g. "lines 100-3 of 3" for an out-of-range offset).
+	const from = Math.min(start, lines.length)
+	const end = Math.min(lines.length, from + size)
+	const selected = from >= lines.length ? [] : lines.slice(from, end)
 	const numbered = selected.map(
-		(line, index) => `${start + index + 1} | ${line}`,
+		(line, index) => `${from + index + 1} | ${line}`,
 	)
+	const header =
+		from >= lines.length
+			? `${normalized} (no lines in range: file has ${lines.length} line(s))`
+			: `${normalized} (lines ${from + 1}-${end} of ${lines.length})`
 	return {
-		header: `${normalized} (lines ${start + 1}-${end} of ${lines.length})`,
+		header,
 		text: numbered.join('\n'),
 		vaultPath,
 	}

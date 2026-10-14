@@ -19,6 +19,45 @@ export function getRemoteFileChanged(
 	return !isSameTime(remoteTime(remote), remoteTime(recordedRemote))
 }
 
+/**
+ * Decide whether the local file changed since the record was written, using the
+ * same evidence as {@link getFileChanges}: content hash first, then the base
+ * snapshot. Used for local-only decisions (the remote side is gone), so a
+ * timestamp-only rewrite is not mistaken for a real edit.
+ */
+export async function getLocalFileChanged(
+	input: SyncDecisionInput,
+	local: Extract<StatModel, { isDir: false }>,
+	record: SyncRecordItem,
+): Promise<boolean> {
+	if (isSameTime(local.mtime, record.local.mtime)) {
+		return false
+	}
+	const recordedHash =
+		(record.local.isDir ? undefined : record.local.hash) ?? record.base?.hash
+	const recordedLocalSize = record.local.isDir ? undefined : record.local.size
+	if (local.size !== recordedLocalSize) {
+		return true
+	}
+	if (recordedHash && input.getLocalContentHash) {
+		try {
+			const currentHash = await input.getLocalContentHash(local.path)
+			if (currentHash) {
+				return currentHash !== recordedHash
+			}
+		} catch {
+			// fall through to the base snapshot comparison below
+		}
+	}
+	if (record.base?.key && !record.local.isDir) {
+		const base = await input.getBaseContent(record.base.key)
+		if (base) {
+			return !(await input.compareFileContent(local.path, base))
+		}
+	}
+	return true
+}
+
 /** All policies use the same evidence: content hashes/ETags first, then
  * server-provided timestamps. Planning never downloads remote content.
  */

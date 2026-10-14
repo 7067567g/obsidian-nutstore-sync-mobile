@@ -22,7 +22,13 @@ export function sha256Fallback(data: BufferSource): ArrayBuffer {
 			? new Uint8Array(data)
 			: new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
 	const bitLength = bytes.length * 8
-	const withPadding = new Uint8Array((((bytes.length + 9) >> 6) + 1) << 6)
+	// Pad to the next 64-byte block boundary after appending the 0x80 byte and
+	// the 8-byte big-endian length. `(len + 8) >> 6` rounds down the number of
+	// full blocks that already fit the message + 0x80; the extra bit of length
+	// lives in the always-present final block. Using `(len + 9)` here would add
+	// a spurious extra zero block whenever `len + 9` is already a multiple of 64
+	// (i.e. message length ≡ 55 mod 64) and produce a wrong digest.
+	const withPadding = new Uint8Array((((bytes.length + 8) >> 6) + 1) << 6)
 	withPadding.set(bytes)
 	withPadding[bytes.length] = 0x80
 	const view = new DataView(withPadding.buffer)

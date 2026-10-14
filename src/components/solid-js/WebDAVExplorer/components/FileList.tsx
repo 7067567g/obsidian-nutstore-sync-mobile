@@ -16,6 +16,23 @@ export interface FileListProps {
 	onClick: (file: FileStat) => void
 }
 
+/**
+ * Returns a directory-first, name-sorted copy of `items`.
+ * Sorting a copy keeps the caller's array (which may be reactive state) intact;
+ * `Array.prototype.sort` sorts in place and must not mutate the input here.
+ */
+export function sortedFileStats(items: FileStat[]): FileStat[] {
+	return [...items].sort((a, b) => {
+		if (a.isDir === b.isDir) {
+			return a.basename.localeCompare(b.basename, ['zh'])
+		}
+		if (a.isDir && !b.isDir) {
+			return -1
+		}
+		return 1
+	})
+}
+
 export function createFileList() {
 	const [version, setVersion] = createSignal(0)
 	return {
@@ -25,17 +42,7 @@ export function createFileList() {
 		FileList(props: FileListProps) {
 			const [items, setItems] = createSignal<FileStat[]>([])
 
-			const sortedItems = () =>
-				items().sort((a, b) => {
-					if (a.isDir === b.isDir) {
-						return a.basename.localeCompare(b.basename, ['zh'])
-					}
-					if (a.isDir && !b.isDir) {
-						return -1
-					} else {
-						return 1
-					}
-				})
+			const sortedItems = () => sortedFileStats(items())
 
 			async function refresh() {
 				try {

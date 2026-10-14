@@ -181,3 +181,53 @@ describe('content-hash and server-time evidence', () => {
 		)
 	})
 })
+
+describe('local-only change evidence', () => {
+	it('detects a real local edit via content hash when size is unchanged', async () => {
+		const { input, local, remote, record } = fixture('note.md', 'A')
+		const inputWithHash = input as typeof input & {
+			getLocalContentHash?: (filePath: string) => Promise<string>
+		}
+		const recordStat = record as typeof record & { local: { hash?: string } }
+		local.mtime = record.local.mtime + 1
+		recordStat.local.hash = 'hash-A'
+		inputWithHash.getLocalContentHash = vi.fn(async () => 'hash-B')
+
+		const changes = await getFileChanges(inputWithHash, local, remote, recordStat)
+
+		expect(changes.localChanged).toBe(true)
+		expect(inputWithHash.getLocalContentHash).toHaveBeenCalledWith(local.path)
+	})
+
+	it('falls back to timestamps when only one side exposes an etag', async () => {
+		const { input, local, remote, record } = fixture('note.md', 'A')
+		const remoteStat = remote as typeof remote & { etag?: string }
+		const recordStat = record as typeof record & { remote: { etag?: string } }
+		recordStat.remote.etag = 'etag-1'
+		remoteStat.mtime = record.remote.mtime + 1
+
+		const changes = await getFileChanges(input, local, remoteStat, recordStat)
+
+		expect(changes.remoteChanged).toBe(true)
+	})
+
+	it('two-way propagates a remote deletion when the local file was only touched', async () => {
+		const { input, taskFactory } = fixture('note.md', 'A')
+		input.remoteStats = []
+
+		await twoWayDecider(input)
+
+		expect(taskFactory.createRemoveLocalTask).toHaveBeenCalledOnce()
+		expect(taskFactory.createPushTask).not.toHaveBeenCalled()
+	})
+
+	it('receive-only propagates a remote deletion when the local file was only touched', async () => {
+		const { input, taskFactory } = fixture('note.md', 'A')
+		input.remoteStats = []
+
+		await receiveOnlyDecider(input, { revertLocalChanges: false })
+
+		expect(taskFactory.createRemoveLocalTask).toHaveBeenCalledOnce()
+		expect(taskFactory.createSkippedTask).not.toHaveBeenCalled()
+	})
+})

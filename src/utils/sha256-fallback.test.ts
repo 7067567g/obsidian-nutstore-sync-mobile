@@ -25,4 +25,19 @@ describe('sha256 fallback', () => {
 			'2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
 		)
 	})
+
+	// Regression: message lengths where `len + 9` is an exact multiple of the
+	// 64-byte block size used to be padded with a spurious extra zero block,
+	// producing a wrong digest (length ≡ 55 mod 64).
+	it.each([0, 1, 54, 55, 56, 63, 64, 119, 120, 127, 128, 191, 255, 256])(
+		'matches the platform SHA-256 for a %i-byte message',
+		async (length) => {
+			const bytes = new Uint8Array(length)
+			for (let index = 0; index < length; index += 1) {
+				bytes[index] = (index * 31 + 7) % 256
+			}
+			const primary = await crypto.subtle.digest('SHA-256', bytes)
+			expect(hex(sha256Fallback(bytes))).toBe(hex(primary))
+		},
+	)
 })
