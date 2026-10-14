@@ -1,12 +1,12 @@
 /**
- * R-001 / P-004 mock evidence (no real device required).
+ * Regression test for the P-006 fix in `obsidianFetch` (WS3-B2 / WS8-B1).
  *
- * `obsidianFetch` (WS3-B2) and `src/webdav-patch.ts` (WS8-B1) both build a
- * `Response` with the raw `requestUrl` status. The Fetch `Response` constructor
- * only accepts 200–599, so informational statuses (101/103) throw `RangeError`;
- * statuses >= 600 fail even earlier because `getReasonPhrase` has no entry.
- * Either way the whole request fails. These tests pin the current behaviour with
- * a mocked `requestUrl` so the defect is verifiable without an Obsidian runtime.
+ * `obsidianFetch` builds a `Response` with the raw `requestUrl` status. The
+ * Fetch `Response` constructor only accepts 200–599, so informational statuses
+ * (101/103) used to throw `RangeError`; statuses >= 600 failed even earlier
+ * because `getReasonPhrase` has no entry. It now maps out-of-range statuses into
+ * the valid range so the request no longer fails. A mocked `requestUrl` keeps
+ * this test free of an Obsidian runtime.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -29,25 +29,23 @@ describe('obsidianFetch status range mock (R-001 / WS3-B2 / WS8-B1)', () => {
 		vi.clearAllMocks()
 	})
 
-	it('throws RangeError for informational status 101', async () => {
+	it('maps informational status 101 to a valid Response (200) without throwing', async () => {
 		requestUrl.mockResolvedValue(makeResponse(101))
-		await expect(obsidianFetch('https://example.com/')).rejects.toThrow(
-			RangeError,
-		)
+		const response = await obsidianFetch('https://example.com/')
+		expect(response).toBeInstanceOf(Response)
+		expect(response.status).toBe(200)
 	})
 
-	it('throws RangeError for informational status 103', async () => {
+	it('maps informational status 103 to a valid Response (200) without throwing', async () => {
 		requestUrl.mockResolvedValue(makeResponse(103))
-		await expect(obsidianFetch('https://example.com/')).rejects.toThrow(
-			RangeError,
-		)
+		const response = await obsidianFetch('https://example.com/')
+		expect(response.status).toBe(200)
 	})
 
-	it('fails for out-of-range status 600 (no reason phrase defined)', async () => {
+	it('maps out-of-range status 600 to 500 without throwing', async () => {
 		requestUrl.mockResolvedValue(makeResponse(600))
-		await expect(obsidianFetch('https://example.com/')).rejects.toThrow(
-			/Status code does not exist/,
-		)
+		const response = await obsidianFetch('https://example.com/')
+		expect(response.status).toBe(500)
 	})
 
 	it('root cause is the platform Response constructor (200–599 only)', () => {

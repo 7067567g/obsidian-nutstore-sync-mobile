@@ -1,12 +1,11 @@
 /**
- * R-001 / P-004 mock evidence (no real device required).
+ * Regression test for the P-006 fix in `getDirectoryContents` (WS-7).
  *
- * `getDirectoryContents` (WS-7) follows WebDAV pagination with
- * `new URL(nextLink)` — no base URL is supplied. A `rel="next"` Link value that
- * is a relative reference (a legal DAV response) therefore throws
- * `TypeError: Invalid URL`. These tests pin the current behaviour and show the
- * absolute-link path still works, using a mocked `requestUrl` so no real DAV
- * server is needed.
+ * `rel="next"` Link values may be relative references (legal per RFC 8288). The
+ * original code called `new URL(nextLink)` with no base URL, which threw
+ * `TypeError: Invalid URL` and aborted the whole directory listing. It now
+ * resolves against the current request URL. A mocked `requestUrl` keeps the
+ * test free of a real DAV server.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -41,14 +40,20 @@ describe('getDirectoryContents pagination mock (R-001 / WS-7)', () => {
 		vi.clearAllMocks()
 	})
 
-	it('throws TypeError for a relative rel="next" link (no base URL)', async () => {
-		requestUrl.mockResolvedValueOnce(
-			makeResponse(DAV_XML, '</dav/page2>; rel="next"'),
-		)
+	it('resolves a relative rel="next" link against the current request URL', async () => {
+		requestUrl
+			.mockResolvedValueOnce(
+				makeResponse(DAV_XML, '</dav/page2>; rel="next"'),
+			)
+			.mockResolvedValueOnce(makeResponse(DAV_XML))
 
-		await expect(
-			getDirectoryContents(settings, 'token', '/'),
-		).rejects.toThrow(TypeError)
+		const contents = await getDirectoryContents(settings, 'token', '/')
+
+		expect(requestUrl).toHaveBeenCalledTimes(2)
+		expect(requestUrl.mock.calls[1][0].url).toBe(
+			'https://dav.example.com/dav/page2',
+		)
+		expect(contents).toHaveLength(2)
 	})
 
 	it('follows an absolute rel="next" link and returns both pages', async () => {

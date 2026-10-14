@@ -1,11 +1,11 @@
 /**
- * R-001 / P-004 mock evidence (no real device required).
+ * Regression test for the P-006 fix in `getDelta` (WS-7).
  *
- * `getDelta` (WS-7) dereferences `result.response` / `result.response.delta`
- * after parsing the response XML, but only guards `result.response.cursor` with
- * optional chaining. A response without a `<response>` node (error payload)
- * therefore throws `TypeError`. These tests pin the current behaviour with a
- * mocked `requestUrl`, so no real server is needed.
+ * The original code dereferenced `result.response` / `result.response.delta`
+ * after parsing the response XML, but only guarded `result.response.cursor`
+ * with optional chaining. A response without a `<response>` node (error
+ * payload) therefore threw `TypeError`. It now normalises to an empty delta.
+ * A mocked `requestUrl` keeps the test free of a real server.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -35,14 +35,19 @@ describe('getDelta response guard mock (R-001 / WS-7)', () => {
 		vi.clearAllMocks()
 	})
 
-	it('throws TypeError when the payload has no <response> node', async () => {
+	it('returns an empty delta when the payload has no <response> node', async () => {
 		requestUrl.mockResolvedValue(
 			makeResponse('<?xml version="1.0" encoding="utf-8"?><error/>'),
 		)
 
-		await expect(
-			getDelta({ folderName: 'f', settings, token: 't' }),
-		).rejects.toThrow(TypeError)
+		const result = await getDelta({ folderName: 'f', settings, token: 't' })
+
+		expect(result.response).toEqual({
+			reset: false,
+			cursor: '',
+			hasMore: false,
+			delta: { entry: [] },
+		})
 	})
 
 	it('parses a valid delta payload and HTML-decodes entry paths', async () => {

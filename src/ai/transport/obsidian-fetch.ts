@@ -21,6 +21,24 @@ function toHeadersRecord(headers?: HeadersInit) {
 	return { ...headers }
 }
 
+/**
+ * The Fetch `Response` constructor only accepts status codes in [200, 599].
+ * Obsidian's `requestUrl` can surface 1xx informational responses or
+ * non-standard codes; map those into the valid range so building a `Response`
+ * never throws `RangeError`.
+ */
+function toResponseStatus(status: number): number {
+	if (status < 200) {
+		// Informational: the request produced no final body; treat it as 200.
+		return 200
+	}
+	if (status > 599) {
+		// Non-standard: keep "error" semantics instead of turning it into 200.
+		return 500
+	}
+	return status
+}
+
 async function toRequestParts(input: RequestInfo | URL, init?: RequestInit) {
 	if (input instanceof Request) {
 		return {
@@ -61,14 +79,15 @@ export const obsidianFetch: typeof fetch = async (
 		signal,
 	)
 	throwIfAborted(signal)
-	const statusText = getReasonPhrase(response.status)
+	const status = toResponseStatus(response.status)
+	const statusText = getReasonPhrase(status)
 
 	return new Response(
 		[101, 103, 204, 205, 304].includes(response.status)
 			? null
 			: response.arrayBuffer,
 		{
-			status: response.status,
+			status,
 			statusText,
 			headers: response.headers,
 		},

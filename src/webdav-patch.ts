@@ -30,6 +30,22 @@ function onlyAscii(str: string) {
 	return !/[^\u0000-\u00ff]/g.test(str)
 }
 
+/**
+ * The Fetch `Response` constructor only accepts status codes in [200, 599].
+ * `requestUrl` can surface 1xx informational responses or non-standard codes;
+ * map those into the valid range so building a `Response` never throws
+ * `RangeError`. Same fix as `src/ai/transport/obsidian-fetch.ts`.
+ */
+function toResponseStatus(status: number): number {
+	if (status < 200) {
+		return 200
+	}
+	if (status > 599) {
+		return 500
+	}
+	return status
+}
+
 if (VALID_REQURL) {
 	getPatcher().patch('request', async (args: unknown): Promise<Response> => {
 		const options = args as RequestOptionsWithState
@@ -78,16 +94,17 @@ if (VALID_REQURL) {
 		}
 
 		let r2: Response | undefined
-		const statusText = getReasonPhrase(r.status)
+		const status = toResponseStatus(r.status)
+		const statusText = getReasonPhrase(status)
 		if ([101, 103, 204, 205, 304].includes(r.status)) {
 			r2 = new Response(null, {
-				status: r.status,
+				status,
 				statusText: statusText,
 				headers: rspHeaders,
 			})
 		} else {
 			r2 = new Response(r.arrayBuffer, {
-				status: r.status,
+				status,
 				statusText: statusText,
 				headers: rspHeaders,
 			})

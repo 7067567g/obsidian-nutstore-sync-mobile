@@ -58,11 +58,23 @@ export const getDelta = apiLimiter.wrap(
 			},
 			processEntities: false,
 		})
-		const result = parseXml.parse(response.text) as {
-			response: DeltaResponse
+		const parsed = parseXml.parse(response.text) as
+			| { response?: DeltaResponse }
+			| null
+			| undefined
+		// A response without a <response> node (e.g. an error payload) would
+		// otherwise throw `TypeError` when dereferencing `result.response`.
+		// Normalise it to an empty delta so callers keep their contract.
+		const result: { response: DeltaResponse } = {
+			response: parsed?.response ?? {
+				reset: false,
+				cursor: '',
+				hasMore: false,
+				delta: { entry: [] },
+			},
 		}
 
-		if (!isNil(result?.response?.cursor)) {
+		if (!isNil(result.response.cursor)) {
 			result.response.cursor = result.response.cursor.toString()
 		}
 		if (result.response.delta) {
