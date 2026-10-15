@@ -63,6 +63,7 @@ describe('AgentEventProjector', () => {
 
 		const timing = agent.toolTimings['call-1']
 		expect(timing.finishedAt! - timing.startedAt).toBe(125)
+		expect(timing.outcome).toBe('completed')
 		expect(agent.timeline[0].parts[0]).toMatchObject({
 			state: 'output-available',
 			output: 'ok',
@@ -175,7 +176,7 @@ describe('AgentEventProjector', () => {
 		expect(persistSession).toHaveBeenCalledTimes(2)
 	})
 
-	function makeToolProjector(flushSession: () => Promise<void>) {
+	it('routes string tool outputs through retention on both projection paths', async () => {
 		const agent = createEmptyMasterAgent(1)
 		const session: ChatSession = {
 			schemaVersion: 2,
@@ -184,48 +185,75 @@ describe('AgentEventProjector', () => {
 			updatedAt: 1,
 			subagents: { master: agent },
 		}
-		return new AgentEventProjector({
+		const runtime = {
+			runState: 'thinking',
+			draft: { text: '', userContext: [] },
+			scheduler: createMasterTurnScheduler(),
+		} as SessionRuntimeState
+		const retention = {
+			retain: vi.fn(
+				async (_sessionId: string, text: string) => `retained:${text.length}`,
+			),
+		}
+		const projector = new AgentEventProjector({
 			session,
 			agent,
+			runtime,
 			store: {
 				persistSession: vi.fn(async () => undefined),
-				flushSession,
+				flushSession: vi.fn(async () => undefined),
 			} as never,
 			messageFactory: new MessageFactory({ app: {} } as never, vi.fn()),
 			notify: vi.fn(),
 			assistantMeta: { providerId: 'provider', modelId: 'model' },
 			isTurnAlive: () => true,
+			retention,
 		})
-	}
-
-	it('flushes the session before a side-effecting tool executes', async () => {
-		const flushSession = vi.fn(async () => undefined)
-		const projector = makeToolProjector(flushSession)
 		await projector.project({
 			type: 'tool-execution-start',
 			toolCall: {
 				type: 'tool-call',
 				toolCallId: 'call-1',
-				toolName: 'bash',
+				toolName: 'lookup',
 				input: {},
 			} as never,
 		})
-		expect(flushSession).toHaveBeenCalledWith('session')
-	})
-
-	it('does not flush before a read-only tool executes', async () => {
-		const flushSession = vi.fn(async () => undefined)
-		const projector = makeToolProjector(flushSession)
 		await projector.project({
-			type: 'tool-execution-start',
-			toolCall: {
-				type: 'tool-call',
-				toolCallId: 'call-1',
-				toolName: 'view_image',
-				input: {},
-			} as never,
+			type: 'tool-execution-end',
+			toolCallId: 'call-1',
+			durationMs: 1,
+			toolOutput: { type: 'tool-result', output: 'A'.repeat(100) },
 		})
-		expect(flushSession).not.toHaveBeenCalled()
+		expect(agent.timeline[0].parts[0]).toMatchObject({
+			state: 'output-available',
+			output: 'retained:100',
+		})
+		await projector.project({
+			type: 'tool-results',
+			outcomes: [
+				{
+					type: 'tool-result',
+					toolCallId: 'call-1',
+					toolName: 'lookup',
+					input: {},
+					output: 'B'.repeat(50),
+					dynamic: true,
+				},
+			],
+			metadata: new Map(),
+		})
+		expect(retention.retain).toHaveBeenCalledWith('session', 'A'.repeat(100), {
+			toolName: 'lookup',
+			toolCallId: 'call-1',
+		})
+		expect(retention.retain).toHaveBeenCalledWith('session', 'B'.repeat(50), {
+			toolName: 'lookup',
+			toolCallId: 'call-1',
+		})
+		expect(agent.timeline[0].parts[0]).toMatchObject({
+			state: 'output-available',
+			output: 'retained:50',
+		})
 	})
 
 	it('rejects events after the turn loses ownership', async () => {

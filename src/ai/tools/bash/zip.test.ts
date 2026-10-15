@@ -1,7 +1,7 @@
 import { zipSync } from 'fflate/browser'
 import { Bash, InMemoryFs } from 'just-bash/browser'
 import { describe, expect, it } from 'vitest'
-import { archiveCommands } from './zip'
+import { UNZIP_MAX_DECOMPRESSED_SIZE, archiveCommands } from './zip'
 
 const content = 'English text 与中文内容\nSecond neutral line 第二行\n'
 
@@ -80,6 +80,23 @@ describe('zip and unzip commands', () => {
 
 		expect(overwritten).toMatchObject({ stderr: '', exitCode: 0 })
 		expect(await bash.fs.readFile('/workspace/output/source.txt')).toBe(content)
+	})
+
+	it('allows extracting into the virtual root destination', async () => {
+		const bash = createBash({
+			'/workspace/root.zip': zipSync({
+				'root.txt': new TextEncoder().encode('neutral 中性内容\n'),
+			}),
+		})
+
+		const result = await bash.exec('unzip -o root.zip -d /')
+
+		expect(result).toMatchObject({ stderr: '', exitCode: 0 })
+		expect(await bash.fs.exists('/root.txt')).toBe(true)
+	})
+
+	it('uses a dedicated 128 MiB decompressed cap', () => {
+		expect(UNZIP_MAX_DECOMPRESSED_SIZE).toBe(128 * 1024 * 1024)
 	})
 
 	it('rejects archive entries that escape the extraction directory', async () => {

@@ -44,6 +44,7 @@ type ZipInput = Record<string, Uint8Array | [Uint8Array, ZipOptions]>
 
 const ZIP_MIN_MTIME = new Date(1980, 0, 1)
 const ZIP_MAX_MTIME = new Date(2099, 11, 31, 23, 59, 58)
+export const UNZIP_MAX_DECOMPRESSED_SIZE = 128 * 1024 * 1024
 
 function bytesToLatin1(bytes: Uint8Array) {
 	const chunkSize = 0x8000
@@ -267,8 +268,10 @@ function entryNameForPath(cwd: string, absolutePath: string) {
 function safeEntryPath(destination: string, entryName: string) {
 	const pathParts = entryName.split('/')
 	if (
+		!entryName ||
 		entryName.startsWith('/') ||
 		entryName.includes('\\') ||
+		entryName.includes('\0') ||
 		pathParts.some(
 			(part, index) =>
 				part === '..' || (part === '' && index !== pathParts.length - 1),
@@ -276,8 +279,14 @@ function safeEntryPath(destination: string, entryName: string) {
 	) {
 		throw new Error(`unsafe archive entry: ${entryName}`)
 	}
-	const target = pathPosix.resolve(destination, entryName)
-	if (target !== destination && !target.startsWith(`${destination}/`)) {
+	const base = pathPosix.resolve('/', destination || '.')
+	const target = pathPosix.resolve(base, entryName)
+	const relative = pathPosix.relative(base, target)
+	if (
+		relative === '' ||
+		relative.startsWith('..') ||
+		pathPosix.isAbsolute(relative)
+	) {
 		throw new Error(`unsafe archive entry: ${entryName}`)
 	}
 	return target
@@ -538,15 +547,14 @@ async function extractZip(
 		}
 
 		assertSupportedEntries(entries)
-		const maxOutputSize = ctx.limits?.maxOutputSize ?? 0
 		const totalSize = entries.reduce(
 			(total, entry) => total + entry.uncompressedSize,
 			0,
 		)
-		if (maxOutputSize > 0 && totalSize > maxOutputSize) {
+		if (totalSize > UNZIP_MAX_DECOMPRESSED_SIZE) {
 			return commandError(
 				'unzip',
-				`decompressed data exceeds limit (${maxOutputSize} bytes)`,
+				`decompressed data exceeds limit (${UNZIP_MAX_DECOMPRESSED_SIZE} bytes)`,
 			)
 		}
 		const selected = new Set(entries.map((entry) => entry.name))

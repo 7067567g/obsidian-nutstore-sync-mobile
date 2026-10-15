@@ -1,8 +1,8 @@
-<h1 align="center">Nutstore Sync — 个人修订版 / Personal Revision</h1>
+<h1 align="center">Nutstore Sync Mobile — 移动端自定义构建 / Mobile Custom Build</h1>
 
 <p align="center">
-  <strong>非官方个人修改版，不是原作者的官方仓库。</strong><br>
-  <em>Unofficial personal modified version. Not the original project.</em>
+  <strong>基于上游的移动端自定义构建，不是原作者的官方仓库。</strong><br>
+  <em>Mobile custom build based on upstream. Not the original project.</em>
 </p>
 
 <p align="center">
@@ -11,52 +11,72 @@
 </p>
 
 > [!IMPORTANT]
-> **本仓库是个人修订版（personal revision），与原作者、坚果云官方均无隶属或背书关系。**
+> **本仓库是维护者基于上游维护的移动端自定义构建；与原作者、坚果云官方均无隶属或背书关系。**
 > 如果你要安装或使用官方版本，请前往 Obsidian 社区插件或原仓库：
 > <https://github.com/nutstore/obsidian-nutstore-sync>
 >
-> **This repository is an unofficial personal modified version and is not affiliated with, maintained by, or endorsed by the original authors or Nutstore.**
+> **This repository is a mobile custom build maintained by its author based on upstream, and is not affiliated with, maintained by, or endorsed by the original authors or Nutstore.**
 > For the official plugin, please use the original repository:
 > <https://github.com/nutstore/obsidian-nutstore-sync>
 
-| 项目 | 信息 |
-| --- | --- |
-| 原仓库 / Upstream | [nutstore/obsidian-nutstore-sync](https://github.com/nutstore/obsidian-nutstore-sync) |
-| 本仓库 / This fork | [7067567g/obsidian-nutstore-sync-personal](https://github.com/7067567g/obsidian-nutstore-sync-personal) |
-| 基线 / Based on | `79d35b4` |
-| 个人修订标签 / Personal tag | `personal-20260911` |
-| 许可证 / License | [AGPL-3.0](LICENSE)，与上游相同 / same as upstream |
+| 项目                                 | 信息                                                                                                |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| 原仓库 / Upstream                    | [nutstore/obsidian-nutstore-sync](https://github.com/nutstore/obsidian-nutstore-sync)               |
+| 本仓库 / This fork                   | [7067567g/obsidian-nutstore-sync-mobile](https://github.com/7067567g/obsidian-nutstore-sync-mobile) |
+| 上游基线 / Upstream base             | `79d35b4`                                                                                           |
+| 自定义改动起点 / Modifications start | `personal-20260911`（历史起点）                                                                     |
+| 当前版本 / Current version           | **1.5.5**                                                                                           |
+| 当前构建标签 / Current build tag     | `v1.5.5-mobile.1`                                                                                   |
+| 许可证 / License                     | [AGPL-3.0](LICENSE)，与上游相同 / same as upstream                                                  |
 
-### 个人修改摘要 / Personal changes
+### 这版主要改了什么（1.5.5 / mobile stability）
 
-这是原项目的个人修改分支，主要差异如下：
+- **#94 会话检查点屏障**：副作用工具 body 前落盘；工具执行中强杀恢复为 `TOOL_OUTCOME_UNKNOWN`，不自动重试副作用。
+- **#92 会话存储恢复**：torn-tail 扫描/恢复、atomic temp/backup 启动清理、activeSegment 先发布；陈旧 temp/backup 不再永久残留。
+- **#91 工具输出有界化**：>8192 B 输出 head/tail + spill 到 `.agents/nutstore-sync/spill/`，会话字节下降且可回读。
+- **#96 超时/取消**：active wall-clock 超时（页面隐藏时间不计入）、`abortSignal` 透传 just-bash、长任务 heartbeat 指标。
+- **#100 同步入口硬闸门**：regex 复杂度预检、`vault_json` 20 MiB stat-before-read、图片 20 MiB / PDF 50 MiB 上限、Bash 64 MiB 写入/32 递归预算、`vault_stat` 10 s walk deadline。
+- **#97 capability probe**：启动自检导出 Worker / navigatorLocks / TextEncoder / structuredClone 等能力字段。
+- **工具增强**：`vault_stat`、`vault_json`、`vault_hash`、`vault_batch_edit` 等原生工具；`view_pdf` 文本优先、无文字层图片回退；settings 白名单新增工具超时。
+- **真机结果**：Android 72 MB 级真实长会话冒烟通过（首屏约 3 s、滑动流畅）；崩溃点矩阵 r1–r10、外部写冲突均已通过。
 
-- 会话存储冷读与恢复相关修复；
-- 新增原生 vault 工具与设置白名单工具；
-- 新增 `view_pdf`：优先读取 PDF 文本，无文字层时渲染成图片交给模型；
-- 新增本地构建、安装、release 脚本；
-- 其他修改记录见 [`PERSONAL_REVISION.md`](PERSONAL_REVISION.md)。
+### 安装与构建
+
+- 本仓库是**源码仓库**：`.gitignore` 不提交 `main.js` / `styles.css` / `dist` / `release`，请本地构建。
+- 构建：
+  ```bash
+  node scripts/bootstrap-deps.mjs
+  node scripts/release-local.mjs
+  ```
+  产物位于 `release/nutstore-sync-<version>/`（含 `main.js`、`manifest.json`、`styles.css`、`SHA256SUMS.txt`）。
+- 手机安装：把 `main.js`、`manifest.json`、`styles.css` 放入 Obsidian 插件目录 `.obsidian/plugins/nutstore-sync/`。
+- 其他修改记录见 [`MODIFICATIONS.md`](MODIFICATIONS.md)。
 
 <details>
 <summary>English summary</summary>
 
-- Session storage cold-read and recovery fixes;
-- Native vault tools and whitelisted settings tools;
-- `view_pdf`: text-first PDF reading with image fallback for scanned pages;
-- Local build, install, and release scripts;
-- See [`PERSONAL_REVISION.md`](PERSONAL_REVISION.md) for the full modification record.
+- **#94 checkpoint barrier**: persist side-effect tool calls before the body; interrupted executions recover as `TOOL_OUTCOME_UNKNOWN` and are never auto-retried.
+- **#92 session recovery**: torn-tail scanning, atomic temp/backup cleanup, publish activeSegment before clearing the log.
+- **#91 bounded tool output**: head/tail retention and spill to `.agents/nutstore-sync/spill/`; large results stay readable via locator.
+- **#96 timeout/abort**: active wall-clock timeout (hidden page time excluded), `abortSignal` passed to just-bash, long-task heartbeat metrics.
+- **#100 guard rails**: regex complexity precheck, `vault_json` 20 MiB stat-before-read, image/PDF entry limits, 64 MiB Bash write and 32-depth budgets, `vault_stat` walk deadline.
+- **#97 capability probe**: Worker/locks/TextEncoder/structuredClone capability fields in startup self-check.
+- **Tools**: native `vault_stat` / `vault_json` / `vault_hash` / `vault_batch_edit`, `view_pdf` with image fallback, settings whitelist for tool timeout.
+- **Real-device**: 72 MB-class long session smoke passed (first paint ~3 s, smooth scrolling); crash-point matrix r1–r10 and external-write conflict passed.
+
+This is a source-only repository; build locally with the scripts above.
 
 </details>
 
 ---
 
-# 上游原始 README / Upstream README
+## 上游原始 README / Upstream README
 
 > 以下内容来自原项目 README，保留其原始标题、徽章和说明，仅用于功能参考。版权与商标归原作者所有。
 >
 > The content below is the original upstream README, preserved for feature reference. Copyright and trademarks remain with the original authors.
 
-<h1 align="center">Nutstore Sync</h1>
+<h2 align="center">Nutstore Sync</h2>
 
 <p align="center">
   <a href="#zh">中文</a> ·

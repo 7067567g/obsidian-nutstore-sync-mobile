@@ -45,6 +45,9 @@ describe('diagnostics self-check', () => {
 			'.agents/nutstore-sync/chat-meta.json',
 		])
 		expect(report.requestUrl).toBe('function')
+		for (const value of Object.values(report.capabilities)) {
+			expect(typeof value).toBe('string')
+		}
 		expect(ensureDirectory).toHaveBeenCalledWith('.agents/nutstore-sync')
 	})
 

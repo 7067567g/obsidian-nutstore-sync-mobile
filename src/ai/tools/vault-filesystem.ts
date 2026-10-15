@@ -3,7 +3,11 @@ import { normalizePath, type App } from 'obsidian'
 import { createBuiltinSkillsFs } from '~/ai/skills/builtin'
 import { listAvailableAdapterEntries } from '~/ai/tools/available-adapter-entries'
 import type { PermissionGuard } from '~/ai/tools/permission-guard'
-import { ObsidianVaultFs, ReversibleOpRecorder } from './bash/fs'
+import {
+	ObsidianVaultFs,
+	ReversibleOpRecorder,
+	type BashResourceBudget,
+} from './bash/fs'
 import {
 	AGENTS_MOUNT_POINT,
 	AGENTS_VAULT_PATH,
@@ -22,6 +26,7 @@ export interface CreateVaultFileSystemOptions {
 	getSettingsSnapshot?: SettingsSnapshotFn
 	updateSettings?: SettingsUpdater
 	fileSystemManager?: VaultFileSystemManager
+	resourceBudget?: BashResourceBudget
 }
 
 interface SharedVaultFileSystem {
@@ -105,6 +110,7 @@ async function createScopedVaultFileSystem(
 		await getInitialVaultPaths(app),
 		options.permissionGuard,
 		onRead,
+		options.resourceBudget,
 	)
 	const settingsFs =
 		options.getSettingsSnapshot && options.updateSettings

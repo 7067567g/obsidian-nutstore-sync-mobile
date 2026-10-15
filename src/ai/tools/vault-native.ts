@@ -115,6 +115,27 @@ export async function readVaultBinary(
 	return new Uint8Array(await app.vault.adapter.readBinary(vaultPath))
 }
 
+/**
+ * Read a file's declared size before any full read. Visible files expose
+ * `file.stat.size`; hidden/adapter-only paths fall back to `adapter.stat`.
+ * Returns undefined when the host cannot provide metadata, so callers keep a
+ * post-read fallback gate instead of trusting a missing size.
+ */
+export async function getVaultFileSize(
+	app: App,
+	vaultPath: string,
+): Promise<number | undefined> {
+	const node = app.vault.getAbstractFileByPath(vaultPath)
+	const nodeSize = getNodeSize(node)
+	if (nodeSize !== undefined) return nodeSize
+	try {
+		const stat = await app.vault.adapter.stat(vaultPath)
+		return stat?.type === 'file' ? stat.size : undefined
+	} catch {
+		return undefined
+	}
+}
+
 export async function readVaultText(
 	app: App,
 	vaultPath: string,

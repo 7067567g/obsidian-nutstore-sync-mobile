@@ -371,6 +371,10 @@ export class SessionsFileBackend {
 		}
 	}
 
+	async recoverPendingTemps(): Promise<void> {
+		await this.logBackend?.recoverPendingTemps()
+	}
+
 	async listSessionIds(): Promise<string[]> {
 		let files: string[]
 		let folders: string[]

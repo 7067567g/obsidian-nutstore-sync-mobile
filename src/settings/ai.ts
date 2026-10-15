@@ -167,6 +167,25 @@ export default class AISettings extends BaseSettings {
 				})
 			})
 		new Setting(this.containerEl)
+			.setName(i18n.t('settings.ai.toolTimeout.name'))
+			.setDesc(i18n.t('settings.ai.toolTimeout.desc'))
+			.addText((text) => {
+				text.inputEl.type = 'number'
+				text.inputEl.min = '0'
+				text.inputEl.step = '1'
+				const current = this.plugin.settings.ai.toolTimeoutMs
+				text.setValue(
+					current === undefined ? '' : String(Math.round(current / 1000)),
+				)
+				text.onChange(async (value) => {
+					const seconds = Number.parseInt(value, 10)
+					this.plugin.settings.ai.toolTimeoutMs =
+						Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined
+					await this.persist(false)
+				})
+			})
+
+		new Setting(this.containerEl)
 			.setName(i18n.t('settings.ai.windowedRendering.name'))
 			.setDesc(i18n.t('settings.ai.windowedRendering.desc'))
 			.addToggle((toggle) =>

@@ -42,6 +42,8 @@ export type SettingsWhitelistFile = {
 	configDirSyncMode?: 'none' | 'bookmarks' | 'all'
 	language?: 'zh' | 'en' | ''
 	aiModelLimits?: AIModelLimitWhitelistEntry[]
+	/** Active wall-clock tool timeout in seconds; 0 disables it. */
+	toolTimeoutSeconds?: number
 }
 
 export type NormalizedSettingsPatch = {
@@ -57,6 +59,7 @@ export type NormalizedSettingsPatch = {
 	configDirSyncMode?: 'none' | 'bookmarks' | 'all'
 	language?: 'zh' | 'en' | ''
 	aiModelLimits?: AIModelLimitWhitelistEntry[]
+	toolTimeoutSeconds?: number
 }
 
 export type SettingsParseResult =
@@ -99,6 +102,10 @@ export function applyNormalizedSettingsPatch(
 	}
 	if (patch.language !== undefined) {
 		settings.language = patch.language || undefined
+	}
+	if (patch.toolTimeoutSeconds !== undefined) {
+		settings.ai.toolTimeoutMs =
+			patch.toolTimeoutSeconds > 0 ? patch.toolTimeoutSeconds * 1000 : undefined
 	}
 	if (patch.aiModelLimits !== undefined) {
 		for (const entry of patch.aiModelLimits) {
@@ -144,6 +151,7 @@ const WHITELIST_KEYS = new Set([
 	'configDirSyncMode',
 	'language',
 	'aiModelLimits',
+	'toolTimeoutSeconds',
 ])
 
 type JsonObject = Record<string, unknown>
@@ -520,6 +528,18 @@ export function parseSettingsWhitelistJson(text: string): SettingsParseResult {
 		}
 		patch.language = value as 'zh' | 'en' | ''
 	}
+	if (!isNil(parsed.toolTimeoutSeconds)) {
+		const { number, error } = parseClampedInteger(
+			'toolTimeoutSeconds',
+			parsed.toolTimeoutSeconds,
+			0,
+			MAX_SECONDS,
+		)
+		if (error) {
+			return { ok: false, error }
+		}
+		patch.toolTimeoutSeconds = number!
+	}
 
 	const hasChanges =
 		Object.keys(patch).length > 0 ||
@@ -555,6 +575,9 @@ export function serializeSettingsWhitelist(settings: NutstoreSettings): string {
 		conflictStrategy: settings.conflictStrategy,
 		configDirSyncMode: settings.configDirSyncMode ?? 'none',
 		language: settings.language ?? '',
+		toolTimeoutSeconds: settings.ai?.toolTimeoutMs
+			? Math.round(settings.ai.toolTimeoutMs / 1000)
+			: 0,
 		aiModelLimits: Object.entries(settings.ai?.providers ?? {}).flatMap(
 			([providerId, provider]) =>
 				Object.entries(provider.models ?? {}).flatMap(([modelId, model]) => {
@@ -678,6 +701,14 @@ export function getChangedSettingsPatch(
 		patch.language !== (settings.language ?? '')
 	) {
 		changes.language = patch.language
+	}
+	if (patch.toolTimeoutSeconds !== undefined) {
+		const currentToolTimeout = settings.ai?.toolTimeoutMs
+			? Math.round(settings.ai.toolTimeoutMs / 1000)
+			: 0
+		if (patch.toolTimeoutSeconds !== currentToolTimeout) {
+			changes.toolTimeoutSeconds = patch.toolTimeoutSeconds
+		}
 	}
 	if (patch.aiModelLimits !== undefined) {
 		const changedLimits = patch.aiModelLimits.filter((entry) => {

@@ -302,6 +302,10 @@
 			"windowedRendering": {
 				"name": "长会话窗口化渲染",
 				"desc": "使用浏览器原生 content-visibility 跳过屏幕外消息的布局/绘制。关闭后回退到旧的全量渲染。"
+			},
+			"toolTimeout": {
+				"name": "工具超时（秒）",
+				"desc": "虚拟 bash 等协作式工具的 active wall-clock 预算；留空关闭。页面隐藏/后台时间不计入。"
 			}
 		},
 		"confirmBeforeSync": {

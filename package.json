@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-nutstore-sync",
-	"version": "1.5.1",
+	"version": "1.5.5",
 	"main": "main.js",
 	"type": "module",
 	"scripts": {
@@ -28,6 +28,7 @@
 		"@codemirror/view": "6.36.4",
 		"@electron/remote": "^2.1.2",
 		"@modelcontextprotocol/sdk": "^1.30.0",
+		"@noble/hashes": "2.4.0",
 		"@nutstore/sso-js": "^0.0.9",
 		"@solid-primitives/i18n": "^2.2.0",
 		"@tanstack/solid-table": "^8.21.3",

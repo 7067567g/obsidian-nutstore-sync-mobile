@@ -12,6 +12,7 @@ import {
 } from './tool-context'
 import {
 	clampInt,
+	getVaultFileSize,
 	normalizeVaultVirtualPath,
 	readVaultBinary,
 	toVaultPath,
@@ -272,6 +273,16 @@ export async function executeViewPdf(app: App, options: ViewPdfOptions) {
 	) {
 		throw new Error(
 			'Current model does not support image input; use mode=text or switch to an image-capable model.',
+		)
+	}
+	const declaredSize = await getVaultFileSize(app, vaultPath)
+	if (declaredSize !== undefined && declaredSize > MAX_PDF_BYTES) {
+		throw new Error(
+			'PDF is too large for mobile view_pdf (' +
+				declaredSize +
+				' bytes, limit ' +
+				MAX_PDF_BYTES +
+				'). Use desktop MCP for this file.',
 		)
 	}
 	const data = await readVaultBinary(app, vaultPath)

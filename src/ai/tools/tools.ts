@@ -7,9 +7,12 @@ import { taskTool } from './task'
 import { vaultBatchEditTool } from './vault-batch-edit'
 import { vaultFrontmatterTool } from './vault-frontmatter'
 import { vaultGrepTool } from './vault-grep'
+import { vaultHashTool } from './vault-hash'
+import { vaultJsonTool } from './vault-json'
 import { vaultLinksTool } from './vault-links'
 import { vaultListTool } from './vault-list'
 import { vaultReadTool } from './vault-read'
+import { vaultStatTool } from './vault-stat'
 import { viewImageTool } from './view-image'
 import { viewPdfTool } from './view-pdf'
 
@@ -23,6 +26,9 @@ export function createAITools(options: CreateAIToolsOptions = {}) {
 	return {
 		vault_list: vaultListTool,
 		vault_read: vaultReadTool,
+		vault_stat: vaultStatTool,
+		vault_json: vaultJsonTool,
+		vault_hash: vaultHashTool,
 		vault_grep: vaultGrepTool,
 		vault_links: vaultLinksTool,
 		vault_frontmatter: vaultFrontmatterTool,

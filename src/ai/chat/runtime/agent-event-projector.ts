@@ -8,7 +8,9 @@ import type { ChatSession } from '~/ai/chat/domain'
 import { extractErrorMessage } from '~/ai/chat/error-utils'
 import type { MessageFactory } from '~/ai/chat/messages/message-factory'
 import { normalizeReversibleToolOpRecord } from '~/ai/chat/messages/reversible-op-utils'
+import { isTerminalToolPart } from '~/ai/chat/messages/ui-message'
 import type { SessionRuntimeState } from '~/ai/chat/runtime/chat-state'
+import type { ToolOutputRetainer } from '~/ai/chat/runtime/tool-output-retention'
 import type { SessionStore } from '~/ai/chat/session/session-store'
 import type {
 	AppUIMessage,
@@ -54,12 +56,7 @@ interface AgentEventProjectorOptions {
 	notify: () => void
 	assistantMeta: ChatMessageMeta
 	isTurnAlive: () => boolean
-}
-
-const SIDE_EFFECT_TOOL_NAMES = new Set(['bash', 'apply_patch', 'task'])
-
-function needsCheckpointBeforeToolExecution(toolName: string) {
-	return SIDE_EFFECT_TOOL_NAMES.has(toolName) || toolName.startsWith('mcp__')
+	retention?: ToolOutputRetainer
 }
 
 export class AgentEventProjector {
@@ -67,6 +64,22 @@ export class AgentEventProjector {
 	private lastStreamNotifyAt = 0
 
 	constructor(private options: AgentEventProjectorOptions) {}
+
+	private async retainOutput(
+		output: unknown,
+		toolName: string,
+		toolCallId: string,
+	): Promise<unknown> {
+		if (typeof output !== 'string' || !this.options.retention) return output
+		return await this.options.retention.retain(
+			this.options.session.id,
+			output,
+			{
+				toolName,
+				toolCallId,
+			},
+		)
+	}
 
 	async project(event: AgentProjectionEvent) {
 		if (!this.options.isTurnAlive()) return
@@ -105,11 +118,6 @@ export class AgentEventProjector {
 					this.options.runtime.runState = 'waiting_for_tools'
 				this.touch()
 				this.options.notify()
-				if (needsCheckpointBeforeToolExecution(event.toolCall.toolName)) {
-					// Semantic checkpoint borrowed from the DeepSeek Harness: make the
-					// recorded tool call durable before a tool can mutate the vault.
-					await this.options.store.flushSession(this.options.session.id)
-				}
 				return
 			}
 			case 'tool-execution-end': {
@@ -119,6 +127,8 @@ export class AgentEventProjector {
 				this.options.agent.toolTimings[event.toolCallId] = {
 					startedAt,
 					finishedAt: startedAt + event.durationMs,
+					outcome:
+						event.toolOutput.type === 'tool-error' ? 'error' : 'completed',
 				}
 				const message = this.assistantMessage
 				const partIndex =
@@ -129,6 +139,14 @@ export class AgentEventProjector {
 					) ?? -1
 				const part = message?.parts[partIndex]
 				if (message && part?.type === 'dynamic-tool') {
+					const retainedOutput =
+						event.toolOutput.type === 'tool-result'
+							? await this.retainOutput(
+									event.toolOutput.output,
+									part.toolName,
+									event.toolCallId,
+								)
+							: undefined
 					const common = {
 						type: 'dynamic-tool' as const,
 						toolName: part.toolName,
@@ -154,7 +172,7 @@ export class AgentEventProjector {
 							: {
 									...common,
 									state: 'output-available',
-									output: event.toolOutput.output,
+									output: retainedOutput,
 								}
 				}
 				this.touch()
@@ -179,9 +197,7 @@ export class AgentEventProjector {
 							(candidate) =>
 								candidate.type === 'dynamic-tool' &&
 								candidate.toolCallId === part.toolCallId &&
-								(candidate.state === 'output-available' ||
-									candidate.state === 'output-error' ||
-									candidate.state === 'output-denied'),
+								isTerminalToolPart(candidate),
 						)
 						if (existing) message.parts[index] = existing
 					}
@@ -225,6 +241,14 @@ export class AgentEventProjector {
 							? { callProviderMetadata: target.part.callProviderMetadata }
 							: {}),
 					}
+					const retainedOutput =
+						outcome.type === 'tool-result'
+							? await this.retainOutput(
+									outcome.output,
+									outcome.toolName,
+									outcome.toolCallId,
+								)
+							: undefined
 					const partIndex = target.message.parts.indexOf(target.part)
 					target.message.parts[partIndex] =
 						outcome.type === 'tool-error'
@@ -239,7 +263,7 @@ export class AgentEventProjector {
 							: {
 									...common,
 									state: 'output-available',
-									output: outcome.output,
+									output: retainedOutput,
 								}
 					if (outcome.type === 'tool-error') continue
 					const metadata = event.metadata.get(outcome.toolCallId)

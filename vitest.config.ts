@@ -9,7 +9,9 @@ export default defineConfig({
 		alias: {
 			'~': fileURLToPath(new URL('./src', import.meta.url)),
 			// The published obsidian package ships type definitions only.
-			obsidian: fileURLToPath(new URL('./test/mocks/obsidian.ts', import.meta.url)),
+			obsidian: fileURLToPath(
+				new URL('./test/mocks/obsidian.ts', import.meta.url),
+			),
 		},
 	},
 	test: {

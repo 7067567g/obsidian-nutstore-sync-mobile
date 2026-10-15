@@ -92,6 +92,14 @@ function createHarness() {
 }
 
 describe('ReversibleFs snapshot budget', () => {
+	it('does not expose readdirWithFileTypes when the inner fs lacks it', () => {
+		const { fs } = createHarness()
+		expect(
+			(fs as unknown as { readdirWithFileTypes?: unknown })
+				.readdirWithFileTypes,
+		).toBeUndefined()
+	})
+
 	it('compresses a small file snapshot normally', async () => {
 		const { inner, transitions, fs } = createHarness()
 		inner.files.set('/note.md', new TextEncoder().encode('old'))

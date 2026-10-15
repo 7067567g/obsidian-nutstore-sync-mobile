@@ -35,6 +35,7 @@ import {
 	RuntimeStates,
 } from '~/ai/chat/runtime/runtime-state'
 import { AgentRunner } from '~/ai/chat/runtime/agent-runner'
+import { removeSessionSpill } from '~/ai/chat/runtime/tool-output-retention'
 import { ContextCompactionCoordinator } from '~/ai/chat/runtime/context-compaction-coordinator'
 import {
 	createMasterTurnScheduler,
@@ -617,6 +618,11 @@ export default class ChatService extends BaseService {
 		this.state.runtimeBySessionId.delete(sessionId)
 		this.state.autoApproveRequestsBySessionId.delete(sessionId)
 		await this.store.deleteSession(sessionId)
+		await removeSessionSpill(this.plugin.app.vault, sessionId).catch(
+			(error) => {
+				logger.warn('Failed to remove session spill directory', error)
+			},
+		)
 		await this.store.persistMetaAndIndex()
 		this.notify()
 		new Notice(i18n.t('chatbox.sessionDeleted'))

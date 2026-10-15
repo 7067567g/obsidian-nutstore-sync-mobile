@@ -39,6 +39,14 @@ export interface DiagnosticsSelfCheckReport {
 		usage: number | null
 		error?: string
 	}
+	capabilities: {
+		worker: string
+		navigatorLocks: string
+		textEncoder: string
+		textDecoder: string
+		structuredClone: string
+		requestIdleCallback: string
+	}
 }
 
 function safeStringifyType(value: unknown) {
@@ -72,6 +80,15 @@ function getWindow() {
 function toRecord(value: unknown): Record<string, unknown> {
 	if (typeof value !== 'object' || value === null) return {}
 	return value as Record<string, unknown>
+}
+
+function readType(value: unknown) {
+	return typeof value
+}
+
+function getCapability(name: string) {
+	if (typeof window === 'undefined') return 'undefined'
+	return readType((window as unknown as Record<string, unknown>)[name])
 }
 
 export async function runSelfCheck(
@@ -139,6 +156,17 @@ export async function runSelfCheck(
 		storage: {
 			quota: null,
 			usage: null,
+		},
+		capabilities: {
+			worker: getCapability('Worker'),
+			navigatorLocks: readType(navigatorRecord.locks),
+			textEncoder: getCapability('TextEncoder'),
+			textDecoder: getCapability('TextDecoder'),
+			structuredClone: getCapability('structuredClone'),
+			requestIdleCallback: readType(
+				windowLike &&
+					(windowLike as { requestIdleCallback?: unknown }).requestIdleCallback,
+			),
 		},
 	}
 

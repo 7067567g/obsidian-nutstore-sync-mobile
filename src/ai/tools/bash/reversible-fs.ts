@@ -244,9 +244,6 @@ export class ReversibleFs implements IFileSystem {
 	readdir(path: string) {
 		return this.inner.readdir(path)
 	}
-	readdirWithFileTypes(path: string) {
-		return this.inner.readdirWithFileTypes!(path)
-	}
 
 	rm(path: string, options?: RmOptions) {
 		return this.mutate([path], () => this.inner.rm(path, options))

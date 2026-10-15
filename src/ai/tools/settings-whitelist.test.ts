@@ -99,7 +99,9 @@ describe('settings whitelist model limits', () => {
 			).ai.providers.deepseek.models['deepseek-chat'].limit.context,
 		).toBe(1_000_000)
 
-		const serialized = JSON.parse(serializeSettingsWhitelist(settings)) as {
+		const serialized = JSON.parse(
+			serializeSettingsWhitelist(settings as never),
+		) as {
 			aiModelLimits: Array<Record<string, unknown>>
 		}
 		expect(serialized.aiModelLimits).toEqual([
@@ -130,13 +132,47 @@ describe('settings whitelist model limits', () => {
 			{ providerId: 'deepseek', modelId: 'deepseek-chat', context: 256000 },
 		])
 
-		const parsed = parseSettingsWhitelistJson(serializeSettingsWhitelist(settings as never))
+		const parsed = parseSettingsWhitelistJson(
+			serializeSettingsWhitelist(settings as never),
+		)
 		expect(parsed.ok).toBe(true)
 		if (!parsed.ok) return
 		// Reading then writing the same file must not report any change; a
 		// coerced `output: 0` used to look like an explicit limit change.
-		expect(
-			getChangedSettingsPatch(settings as never, parsed.patch),
-		).toEqual({})
+		expect(getChangedSettingsPatch(settings as never, parsed.patch)).toEqual({})
+	})
+})
+
+describe('settings whitelist tool timeout', () => {
+	it('parses a tool timeout patch in seconds', () => {
+		const parsed = parseSettingsWhitelistJson(
+			JSON.stringify({ toolTimeoutSeconds: 5 }),
+		)
+		expect(parsed.ok).toBe(true)
+		if (!parsed.ok) return
+		expect(parsed.patch.toolTimeoutSeconds).toBe(5)
+	})
+
+	it('applies and serializes the tool timeout without exposing secrets', () => {
+		const settings = settingsFixture() as never as {
+			ai: { toolTimeoutMs?: number }
+		}
+		applyNormalizedSettingsPatch(settings as never, { toolTimeoutSeconds: 5 })
+		expect(settings.ai.toolTimeoutMs).toBe(5000)
+		const serialized = JSON.parse(
+			serializeSettingsWhitelist(settings as never),
+		) as {
+			toolTimeoutSeconds: number
+		}
+		expect(serialized.toolTimeoutSeconds).toBe(5)
+	})
+
+	it('treats 0 as disabling the timeout', () => {
+		const settings = settingsFixture() as never as {
+			ai: { toolTimeoutMs?: number }
+		}
+		settings.ai.toolTimeoutMs = 5000
+		applyNormalizedSettingsPatch(settings as never, { toolTimeoutSeconds: 0 })
+		expect(settings.ai.toolTimeoutMs).toBeUndefined()
 	})
 })
