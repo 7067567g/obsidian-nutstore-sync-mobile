@@ -1,32 +1,16 @@
 import { App, Modal, Setting } from 'obsidian'
-import type { AIFileOperation } from '~/ai/tools/file-operation'
 import type { PermissionRequest } from '~/ai/tools/permission-guard'
 import {
 	applyObsidianModalMountTarget,
 	type ChatModalMountTarget,
 } from '~/ai/chat/ui/modal-mount'
 import i18n from '~/i18n'
+import {
+	getOperationLabel,
+	type AIPermissionResult,
+} from './ai-permission-modal.helpers'
 
-export type AIPermissionResult = 'approve' | 'auto-approve-operation' | 'deny'
-
-function getOperationLabel(operation: AIFileOperation): string {
-	switch (operation) {
-		case 'copy':
-			return i18n.t('aiPermission.operations.copy')
-		case 'delete':
-			return i18n.t('aiPermission.operations.delete')
-		case 'edit':
-			return i18n.t('aiPermission.operations.edit')
-		case 'mkdir':
-			return i18n.t('aiPermission.operations.mkdir')
-		case 'move':
-			return i18n.t('aiPermission.operations.move')
-		case 'read':
-			return i18n.t('aiPermission.operations.read')
-		case 'write':
-			return i18n.t('aiPermission.operations.write')
-	}
-}
+export type { AIPermissionResult } from './ai-permission-modal.helpers'
 
 export default class AIPermissionModal extends Modal {
 	private result: AIPermissionResult = 'deny'
@@ -156,6 +140,18 @@ export default class AIPermissionModal extends Modal {
 		})
 	}
 
+	private renderBashRequest() {
+		if (this.request.type !== 'bash') return
+		const rowEl = this.contentEl.createDiv({ cls: ':uno: mb-2' })
+		rowEl.createEl('strong', {
+			text: i18n.t('aiPermission.bash.command'),
+		})
+		rowEl.createEl('code', {
+			cls: ':uno: block mt-1 break-all whitespace-pre-wrap',
+			text: this.request.command.slice(0, 1000),
+		})
+	}
+
 	onOpen() {
 		this.setTitle(i18n.t('aiPermission.title'))
 
@@ -172,12 +168,54 @@ export default class AIPermissionModal extends Modal {
 		}
 
 		contentEl.createEl('p', {
-			text: i18n.t('aiPermission.message'),
+			text:
+				this.request.type === 'bash'
+					? i18n.t('aiPermission.bash.message')
+					: i18n.t('aiPermission.message'),
 		})
 		contentEl.createEl('p', {
-			text: i18n.t('aiPermission.sessionScopeHint'),
+			text:
+				this.request.type === 'bash'
+					? i18n.t('aiPermission.bash.hint')
+					: i18n.t('aiPermission.sessionScopeHint'),
 		})
 		this.renderPurpose()
+
+		if (this.request.type === 'bash') {
+			this.renderBashRequest()
+			new Setting(contentEl)
+				.addButton((button) => {
+					button.buttonEl.addClass('mod-warning')
+					button.setButtonText(i18n.t('aiPermission.deny')).onClick(() => {
+						this.result = 'deny'
+						this.close()
+					})
+				})
+				.addButton((button) =>
+					button.setButtonText(i18n.t('aiPermission.allowOnce')).onClick(() => {
+						this.result = 'approve'
+						this.close()
+					}),
+				)
+				.addButton((button) =>
+					button
+						.setButtonText(i18n.t('aiPermission.allowSession'))
+						.onClick(() => {
+							this.result = 'approve-session'
+							this.close()
+						}),
+				)
+				.addButton((button) =>
+					button
+						.setButtonText(i18n.t('aiPermission.alwaysAllowPermanent'))
+						.setCta()
+						.onClick(() => {
+							this.result = 'approve-always'
+							this.close()
+						}),
+				)
+			return
+		}
 
 		if (this.request.type === 'settings') {
 			this.renderSettingsRequest()

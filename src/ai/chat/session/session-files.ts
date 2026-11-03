@@ -1,7 +1,12 @@
 import { normalizePath, Vault } from 'obsidian'
+import { writeTextWithParents } from '~/utils/adapter-io'
+import {
+	ATOMIC_TEMP_MARKER,
+	recoverOrphanedBackups,
+} from '~/utils/atomic-replace'
 import { perfMetrics, perfNow } from '~/diagnostics/perf-metrics'
 import type { ChatSession } from '~/ai/chat/domain'
-import type { PersistedChatSession } from '~/ai/chat/session/session-persistence'
+import type { PersistedChatSession } from './session-persistence'
 import {
 	DEFAULT_MAX_INLINE_OPERATION_BYTES,
 	externalizeSessionOperations,
@@ -9,15 +14,18 @@ import {
 	hydrateSessionOperations,
 	isSafeOperationRefPath,
 	type OperationFile,
-} from '~/ai/chat/session/session-operations'
+} from './session-operations'
 import { SessionLogBackend } from './session-log-backend'
 import {
 	runOpsGc,
 	type OpsGcFile,
 	type OpsGcOptions,
 	type OpsGcReport,
+	type RetentionFile,
+	type RetentionScanResult,
 } from './ops-gc'
-import type { JsonRecord } from './session-log-format'
+import type { RetentionCategory } from './retention-policy'
+import { SESSION_LOG_FILENAME, type JsonRecord } from './session-log-format'
 import {
 	readLocalText,
 	removeLocalPath,
@@ -40,6 +48,22 @@ import {
  */
 export const CHAT_ROOT_DIR = '.agents/nutstore-sync'
 export const CHAT_SESSIONS_DIR = `${CHAT_ROOT_DIR}/sessions`
+
+/** Hidden marker that keeps Android media scanners out of the agent data tree. */
+export const CHAT_ROOT_NOMEDIA_FILE = `${CHAT_ROOT_DIR}/.nomedia`
+/**
+ * Best-effort `.nomedia` marker for the agent data root. Media scanning is an
+ * Android storage-pressure/noise source and must never fail plugin startup.
+ */
+export async function ensureChatRootNomedia(vault: Vault) {
+	const path = normalizePath(CHAT_ROOT_NOMEDIA_FILE)
+	try {
+		if (await vault.adapter.exists(path)) return
+		await writeTextWithParents(vault.adapter, path, '')
+	} catch {
+		/* Advisory marker only; storage may be read-only or adapter may be absent. */
+	}
+}
 export const CHAT_META_FILENAME = 'chat-meta.json'
 
 export interface ChatSessionFilePayload {
@@ -60,6 +84,21 @@ export interface SessionsFileBackendOptions {
 	useLegacyBackend?: boolean
 	/** Append log size threshold before compaction into a segment snapshot. */
 	sessionLogCompactionBytes?: number
+	/**
+	 * R2b / S2: TTL for the JSONL write-path freshness probe (index read + log
+	 * stat). Forwarded to `SessionLogBackend`; `0` restores the per-write probe
+	 * used by the freshness regression tests.
+	 */
+	stateFreshnessTtlMs?: number
+	/**
+	 * H4/K16 (WS-7): expose a cheap, comparable per-session version token so
+	 * `SessionStore` revalidates its `loadedSessions` cache after an external
+	 * rewrite (Nutstore sync pull, import, second window). Off by default so
+	 * callers that rely on the legacy "cache stays authoritative until
+	 * `invalidateSession`" contract (frozen store tests) are unaffected; the
+	 * production backend opts in from `chat.service.core.ts`.
+	 */
+	trackSessionFileVersions?: boolean
 }
 
 export interface ReadSessionFileOptions {
@@ -123,10 +162,55 @@ function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>) {
 	return true
 }
 
+/**
+ * WS-5 / H8 (K15 validator + K16 conditional re-verify): a sidecar cache entry
+ * records a comparable validator next to the content hash. The content hash is
+ * already part of the content-addressed file path; the adapter stat (existence +
+ * optional mtime) is the validator that catches external deletion/corruption
+ * that the in-memory hash table cannot see.
+ */
+interface TrackedSidecarHash {
+	hash: string
+	/** Adapter mtime observed when this entry was last written/verified. */
+	mtime?: number
+}
+
+/** K17: hard upper bound on the in-memory sidecar validator table. */
+const MAX_TRACKED_SIDECAR_HASHES = 2048
+/** K17: hard upper bound on remembered ensured directories. */
+const MAX_ENSUREd_DIRECTORIES = 512
+/** K17: hard upper bound on remembered per-session sidecar listings. */
+const MAX_TRACKED_OPERATION_DIRECTORIES = 512
+
+/** Bounds for the six-class retention scan; a report must never stall startup. */
+const RETENTION_SCAN_FILE_CAP = 400
+const RETENTION_SCAN_DIRECTORY_CAP = 80
+const RETENTION_SCAN_MAX_DEPTH = 8
+
+function evictOldestMapKeys<K, V>(map: Map<K, V>, max: number) {
+	while (map.size > max) {
+		const oldest = map.keys().next()
+		if (oldest.done) return
+		map.delete(oldest.value)
+	}
+}
+
+function evictOldestSetValues<T>(set: Set<T>, max: number) {
+	while (set.size > max) {
+		const oldest = set.values().next()
+		if (oldest.done) return
+		set.delete(oldest.value)
+	}
+}
+
 export class SessionsFileBackend {
-	private readonly operationHashes = new Map<string, string>()
+	private readonly operationHashes = new Map<string, TrackedSidecarHash>()
 	private readonly operationFiles = new Map<string, Set<string>>()
 	private readonly ensuredDirectories = new Set<string>()
+	/** K17 bounds; instance fields keep them overridable in tests. */
+	private maxTrackedSidecarHashes = MAX_TRACKED_SIDECAR_HASHES
+	private maxEnsuredDirectories = MAX_ENSUREd_DIRECTORIES
+	private maxTrackedOperationDirectories = MAX_TRACKED_OPERATION_DIRECTORIES
 	private readonly logBackend: SessionLogBackend | null
 
 	constructor(
@@ -138,6 +222,7 @@ export class SessionsFileBackend {
 			: new SessionLogBackend(vault, {
 					sessionsDir: CHAT_SESSIONS_DIR,
 					compactionBytes: options.sessionLogCompactionBytes ?? 512 * 1024,
+					stateFreshnessTtlMs: options.stateFreshnessTtlMs,
 				})
 	}
 
@@ -149,6 +234,55 @@ export class SessionsFileBackend {
 		const configured = this.options.maxInlineOperationBytes
 		const value = typeof configured === 'function' ? configured() : configured
 		return value ?? DEFAULT_MAX_INLINE_OPERATION_BYTES
+	}
+
+	private async statFile(path: string) {
+		try {
+			perfMetrics.recordBridgeCall('adapter.stat')
+			return await this.adapter.stat(path)
+		} catch {
+			return null
+		}
+	}
+
+	/**
+	 * H4 / K16 (WS-7): a cheap, comparable validator for the persisted payload.
+	 *
+	 * R2b / S3: this used to probe `log.exists()` (up to 3 `exists`) and then
+	 * stat all three JSONL files — 4–6 bridge calls on every `loadSessionById`
+	 * cache hit. `log.jsonl` is the commit point of every JSONL write (it is
+	 * created on the first write and kept empty after compaction), so one stat
+	 * of it is enough to catch an external append/rewrite. Only when it is
+	 * absent do we fall back to the legacy whole-session file (one more stat).
+	 *
+	 * `mtime` + `size` is only a *suspicion* that the payload changed, so a
+	 * mismatch makes `SessionStore` re-read the session. Returns `undefined` when
+	 * tracking is disabled or the session has no on-disk files.
+	 */
+	async getSessionFileVersion(
+		id: string,
+	): Promise<string | number | undefined> {
+		if (!this.options.trackSessionFileVersions) return undefined
+		const logStat = await this.statFile(
+			normalizePath(`${CHAT_SESSIONS_DIR}/${id}/${SESSION_LOG_FILENAME}`),
+		)
+		if (logStat && logStat.type !== 'folder') {
+			return `log:${logStat.mtime ?? 0}:${logStat.size ?? 0}`
+		}
+		const stat = await this.statFile(getChatSessionPath(id))
+		if (!stat || stat.type !== 'file') return undefined
+		return `file:${stat.mtime ?? 0}:${stat.size ?? 0}`
+	}
+
+	/**
+	 * N3 (WS-7): whether the session still has on-disk state. Used to tell a
+	 * genuinely missing session (safe to reconcile/trim the index) apart from a
+	 * transient read failure while the file is still there.
+	 */
+	async hasSessionFile(id: string): Promise<boolean> {
+		if (this.logBackend && (await this.logBackend.exists(id))) return true
+		const stat = await this.statFile(getChatSessionPath(id))
+		return stat?.type === 'file'
 	}
 
 	private operationPath(relativePath: string) {
@@ -174,9 +308,45 @@ export class SessionsFileBackend {
 			const path = entry?.ref?.path
 			const hash = entry?.ref?.hash
 			if (typeof path === 'string' && typeof hash === 'string') {
-				this.operationHashes.set(path, hash)
+				this.operationHashes.set(path, { hash })
 			}
 		}
+	}
+
+	/**
+	 * H8 / K16: a cache hit on `operationHashes` is only a *suspicion* that the
+	 * sidecar is unchanged. Because the path is content-addressed but the file
+	 * can be deleted externally (vault sync, cleanup, Android storage reclaim),
+	 * re-verify the validator (stat) before trusting the skip. A missing file, a
+	 * non-file, or a changed mtime forces a rewrite.
+	 */
+	private async isSidecarStillCached(file: OperationFile): Promise<boolean> {
+		const tracked = this.operationHashes.get(file.path)
+		if (!tracked || tracked.hash !== file.hash) return false
+
+		let stat: { type?: string; mtime?: number } | null
+		try {
+			perfMetrics.recordBridgeCall('adapter.stat')
+			stat = await this.adapter.stat(this.operationPath(file.path))
+		} catch {
+			return false
+		}
+		if (!stat || stat.type === 'folder') return false
+		if (
+			tracked.mtime !== undefined &&
+			stat.mtime !== undefined &&
+			stat.mtime !== tracked.mtime
+		) {
+			return false
+		}
+		return true
+	}
+
+	private rememberOperationHash(path: string, hash: string, mtime?: number) {
+		// Refresh insertion order so the bounded eviction below is LRU-ish.
+		this.operationHashes.delete(path)
+		this.operationHashes.set(path, { hash, mtime })
+		evictOldestMapKeys(this.operationHashes, this.maxTrackedSidecarHashes)
 	}
 
 	private async ensureDirectory(path: string) {
@@ -203,6 +373,7 @@ export class SessionsFileBackend {
 			}
 		}
 		this.ensuredDirectories.add(path)
+		evictOldestSetValues(this.ensuredDirectories, this.maxEnsuredDirectories)
 	}
 
 	private async ensureSessionsDir() {
@@ -214,13 +385,23 @@ export class SessionsFileBackend {
 			await this.ensureDirectory(this.getOperationDir(sessionId))
 		}
 		for (const file of files) {
-			if (this.operationHashes.get(file.path) === file.hash) continue
+			// H8 / K15+K16: never skip a sidecar write on a bare in-memory hash
+			// match; re-verify the on-disk validator first.
+			if (await this.isSidecarStillCached(file)) continue
 			await writeLocalTextAtomic(
 				this.vault,
 				this.operationPath(file.path),
 				file.content,
 			)
-			this.operationHashes.set(file.path, file.hash)
+			let mtime: number | undefined
+			try {
+				perfMetrics.recordBridgeCall('adapter.stat')
+				const stat = await this.adapter.stat(this.operationPath(file.path))
+				mtime = stat?.mtime
+			} catch {
+				mtime = undefined
+			}
+			this.rememberOperationHash(file.path, file.hash, mtime)
 		}
 	}
 
@@ -248,6 +429,7 @@ export class SessionsFileBackend {
 			this.operationHashes.delete(relative)
 		}
 		this.operationFiles.set(sessionId, new Set(keep))
+		evictOldestMapKeys(this.operationFiles, this.maxTrackedOperationDirectories)
 	}
 
 	async writeSessionFile(
@@ -271,7 +453,10 @@ export class SessionsFileBackend {
 					...(payload.session as unknown as JsonRecord),
 					title: payload.title,
 				}
-				perfMetrics.recordSessionSize(JSON.stringify(sessionForLog).length)
+				// R2b / D-008 #3: do NOT `JSON.stringify` the whole session here
+				// just to sample its size — that re-serialised ~9.8 MiB on every
+				// persist and defeated the per-message cache (S1). The JSONL
+				// backend records the bytes it actually writes.
 				perfMetrics.recordBridgeCall('session.write.log')
 				await this.logBackend.writeSessionFile(id, sessionForLog, sourceSession)
 			} else {
@@ -372,7 +557,20 @@ export class SessionsFileBackend {
 	}
 
 	async recoverPendingTemps(): Promise<void> {
+		// R2b / S4: atomic-replace backups are now healed here (startup) instead
+		// of on every write. Session/segment directories are covered by the log
+		// backend below; the chat root (chat-meta.json, .nomedia) only here.
+		await recoverOrphanedBackups(this.vault, CHAT_ROOT_DIR)
 		await this.logBackend?.recoverPendingTemps()
+	}
+
+	/**
+	 * R2b / S2: an external writer changed this session, so the JSONL write-path
+	 * state must be dropped as well — otherwise the freshness TTL could keep
+	 * appending onto a state that predates the external change.
+	 */
+	invalidateSessionState(id: string): void {
+		this.logBackend?.invalidateSessionState(id)
 	}
 
 	async listSessionIds(): Promise<string[]> {
@@ -443,6 +641,7 @@ export class SessionsFileBackend {
 					files.push({
 						path: normalized,
 						size: stat?.size ?? 0,
+						mtime: stat?.mtime,
 					})
 				}
 			}
@@ -453,6 +652,112 @@ export class SessionsFileBackend {
 	}
 
 	async removeOperationFiles(paths: string[]): Promise<void> {
+		for (const path of paths) {
+			await removeLocalPath(this.vault, path)
+		}
+	}
+
+	/**
+	 * Walk one class root with hard depth/file caps. Returns `truncated: true`
+	 * instead of throwing when the cap is hit, so the report can say the byte
+	 * count is a lower bound.
+	 */
+	private async scanRetentionRoot(
+		root: string,
+		category: RetentionCategory,
+		classify: (path: string) => RetentionCategory = () => category,
+	): Promise<{ files: RetentionFile[]; truncated: boolean }> {
+		const files: RetentionFile[] = []
+		const stack: Array<{ path: string; depth: number }> = [
+			{ path: normalizePath(root), depth: 0 },
+		]
+		let visitedDirectories = 0
+		let truncated = false
+		while (stack.length > 0) {
+			if (
+				files.length >= RETENTION_SCAN_FILE_CAP ||
+				visitedDirectories >= RETENTION_SCAN_DIRECTORY_CAP
+			) {
+				truncated = true
+				break
+			}
+			const current = stack.pop()
+			if (!current) break
+			visitedDirectories += 1
+			let listed: { files: string[]; folders: string[] }
+			try {
+				listed = await this.adapter.list(current.path)
+			} catch {
+				/* Missing/unreadable class root: report the classes we can see. */
+				continue
+			}
+			for (const file of listed.files) {
+				if (files.length >= RETENTION_SCAN_FILE_CAP) {
+					truncated = true
+					break
+				}
+				const path = normalizePath(file)
+				let size = 0
+				let mtime: number | undefined
+				try {
+					const stat = await this.adapter.stat(path)
+					size = stat?.size ?? 0
+					mtime = stat?.mtime
+				} catch {
+					/* Keep the file with unknown size rather than dropping it. */
+				}
+				files.push({ path, size, mtime, category: classify(path) })
+			}
+			if (current.depth >= RETENTION_SCAN_MAX_DEPTH) {
+				if (listed.folders.length > 0) truncated = true
+				continue
+			}
+			for (const folder of listed.folders) {
+				stack.push({ path: normalizePath(folder), depth: current.depth + 1 })
+			}
+		}
+		return { files, truncated }
+	}
+
+	async listRetentionFiles(): Promise<RetentionScanResult> {
+		const roots: Array<{
+			root: string
+			category: RetentionCategory
+			classify?: (path: string) => RetentionCategory
+		}> = [
+			{
+				root: CHAT_SESSIONS_DIR,
+				category: 'sessions',
+				classify: (path) =>
+					path.includes(ATOMIC_TEMP_MARKER) ? 'tmp' : 'sessions',
+			},
+			{ root: `${CHAT_ROOT_DIR}/ops`, category: 'ops' },
+			{ root: `${CHAT_ROOT_DIR}/spill`, category: 'spill' },
+			{ root: '.trash', category: 'trash' },
+			{ root: `${CHAT_ROOT_DIR}/tmp`, category: 'tmp' },
+			{ root: `${CHAT_ROOT_DIR}/diagnostics`, category: 'diagnostics' },
+			{ root: `${CHAT_ROOT_DIR}/logs`, category: 'diagnostics' },
+		]
+		const files: RetentionFile[] = []
+		const truncated = new Set<RetentionCategory>()
+		for (const entry of roots) {
+			const scan = await this.scanRetentionRoot(
+				entry.root,
+				entry.category,
+				entry.classify,
+			)
+			files.push(...scan.files)
+			if (scan.truncated) {
+				truncated.add(entry.category)
+				if (entry.classify) {
+					for (const file of scan.files) truncated.add(file.category)
+				}
+			}
+		}
+		return { files, truncated: [...truncated] }
+	}
+
+	async removeRetentionFiles(paths: string[]): Promise<void> {
 		for (const path of paths) {
 			await removeLocalPath(this.vault, path)
 		}
@@ -482,7 +787,7 @@ export class SessionsFileBackend {
 			return null
 		}
 		try {
-			const parsed = JSON.parse(content)
+			const parsed: unknown = JSON.parse(content)
 			return isChatMetaFile(parsed) ? parsed : null
 		} catch {
 			return null

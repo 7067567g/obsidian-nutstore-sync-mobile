@@ -1,17 +1,17 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ChatSession, LegacyChatSession } from '~/ai/chat/domain'
 import { createEmptyMasterAgent } from '~/ai/chat/messages/ui-message'
-import { normalizeRehydratedExecution } from '~/ai/chat/session/rehydration-execution'
-import { TOOL_OUTCOME_UNKNOWN } from '~/ai/chat/tool-outcome'
 import {
-	migrateChatSession,
-	normalizeLegacySession,
-} from '~/ai/chat/session/session-migration'
+	countIncompleteToolCalls,
+	normalizeRehydratedExecution,
+} from './rehydration-execution'
+import { TOOL_OUTCOME_UNKNOWN } from '~/ai/chat/tool-outcome'
+import { migrateChatSession, normalizeLegacySession } from './session-migration'
 import {
 	decodeChatSessionFromStorage,
 	encodeChatSessionForStorage,
 	type PersistedChatSession,
-} from '~/ai/chat/session/session-persistence'
+} from './session-persistence'
 
 describe('chat session persistence', () => {
 	it('round-trips a subagent model snapshot and accepts legacy agents without one', async () => {
@@ -83,6 +83,56 @@ describe('chat session persistence', () => {
 		} finally {
 			arrayBuffer.mockRestore()
 		}
+	})
+
+	it('counts incomplete tool calls before rehydration normalizes them', () => {
+		const master = createEmptyMasterAgent(1)
+		master.timeline.push({
+			id: 'incomplete-master',
+			role: 'assistant',
+			metadata: { createdAt: 1 },
+			parts: [
+				{
+					type: 'dynamic-tool',
+					toolName: 'bash',
+					toolCallId: 'master-call',
+					state: 'input-available',
+					input: {},
+				},
+			],
+		})
+		const child = {
+			...createEmptyMasterAgent(2),
+			id: 'child',
+			type: 'subagent',
+			status: 'idle' as const,
+		}
+		child.timeline.push({
+			id: 'incomplete-child',
+			role: 'assistant',
+			metadata: { createdAt: 2 },
+			parts: [
+				{
+					type: 'dynamic-tool',
+					toolName: 'bash',
+					toolCallId: 'child-call',
+					state: 'input-streaming',
+					input: {},
+				},
+			],
+		})
+		master.subagents['child'] = child
+		const session: ChatSession = {
+			schemaVersion: 2,
+			id: 'session',
+			createdAt: 1,
+			updatedAt: 1,
+			subagents: { master },
+		}
+
+		expect(countIncompleteToolCalls(session)).toBe(2)
+		normalizeRehydratedExecution(session)
+		expect(countIncompleteToolCalls(session)).toBe(0)
 	})
 
 	it('cleans incomplete execution state from every agent on rehydrate', () => {

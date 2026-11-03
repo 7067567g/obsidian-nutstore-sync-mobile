@@ -4,7 +4,7 @@ import { createVaultPathContextItem } from '~/ai/chat/context/user-context'
 import i18n from '~/i18n'
 import { countMergeConflictBlocks } from '~/utils/merge-conflict-markers'
 import logger from '~/utils/logger'
-import type NutstorePlugin from '..'
+import type NutstorePlugin from '~/index'
 import { BaseService } from './service.interface'
 
 export default class AIConflictResolverService extends BaseService {

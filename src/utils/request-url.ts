@@ -6,9 +6,13 @@ import {
 import logger from './logger'
 import { isNutstoreHost, MOCK_USER_AGENT, NS_SYNC_USER_AGENT } from './ua'
 
-class RequestUrlError extends Error {
+export class RequestUrlError extends Error {
+	readonly status: number
+
 	constructor(public res: RequestUrlResponse) {
 		super(`${res.status}: ${res.text}`)
+		this.name = 'RequestUrlError'
+		this.status = res.status
 	}
 }
 

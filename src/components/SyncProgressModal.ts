@@ -9,28 +9,21 @@ import { BaseTask } from '~/sync/tasks/task.interface'
 import { addClassTokens, removeClassTokens } from '~/utils/class-tokens'
 import getTaskName from '~/utils/get-task-name'
 import { getSyncPreparationText } from '~/utils/sync-preparation-text'
-import NutstorePlugin from '..'
+import NutstorePlugin from '~/index'
 import {
 	emitCancelSync,
 	onCancelSync,
 	onSyncUpdateMtimeProgress,
-} from '../events'
-import i18n from '../i18n'
-import ConflictResolveTask from '../sync/tasks/conflict-resolve.task'
-import MkdirLocalTask from '../sync/tasks/mkdir-local.task'
-import MkdirRemoteTask from '../sync/tasks/mkdir-remote.task'
-import PullTask from '../sync/tasks/pull.task'
-import PushTask from '../sync/tasks/push.task'
-import RemoveLocalTask from '../sync/tasks/remove-local.task'
-import RemoveRemoteTask from '../sync/tasks/remove-remote.task'
-
-type SyncProgressModalState =
-	| 'preparing'
-	| 'syncing'
-	| 'complete'
-	| 'warning'
-	| 'error'
-	| 'cancelled'
+} from '~/events'
+import i18n from '~/i18n'
+import ConflictResolveTask from '~/sync/tasks/conflict-resolve.task'
+import MkdirLocalTask from '~/sync/tasks/mkdir-local.task'
+import MkdirRemoteTask from '~/sync/tasks/mkdir-remote.task'
+import PullTask from '~/sync/tasks/pull.task'
+import PushTask from '~/sync/tasks/push.task'
+import RemoveLocalTask from '~/sync/tasks/remove-local.task'
+import RemoveRemoteTask from '~/sync/tasks/remove-remote.task'
+import { type SyncProgressModalState } from './sync-progress-modal.helpers'
 
 export default class SyncProgressModal extends Modal {
 	private progressTitle!: HTMLElement
@@ -81,8 +74,11 @@ export default class SyncProgressModal extends Modal {
 			!this.progressLabel ||
 			!this.currentFile ||
 			!this.filesList ||
-			!this.stopButtonComponent ||
-			!this.hideButtonComponent
+			// Obsidian's BaseComponent exposes `then()` (chaining API), so a plain
+			// `!component` is misread as a Promise conditional. Compare the
+			// initialisation state instead of the thenable truthiness.
+			typeof this.stopButtonComponent === 'undefined' ||
+			typeof this.hideButtonComponent === 'undefined'
 		) {
 			return
 		}

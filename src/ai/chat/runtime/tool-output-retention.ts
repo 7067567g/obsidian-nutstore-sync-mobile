@@ -30,7 +30,13 @@ export const TOOL_OUTPUT_OMISSION_MARKER =
 	'\n\n[... tool result middle omitted; full text spilled to file ...]\n\n'
 /** Retrieval hint persisted with every spill reference. */
 export const TOOL_OUTPUT_RETRIEVAL_HINT =
-	'Use vault_read on this path, or grep it to search within it.'
+	'Use vault_read for small spills; use bash head/tail or grep for large spills.'
+/**
+ * Sentinel prefixed to generated spill notices. Recognition must be
+ * structural: arbitrary tool output can contain the legacy English notice
+ * strings and must not be able to disable retention by accident.
+ */
+export const TOOL_OUTPUT_SPILL_NOTICE_MARK = '[tool-output-spill:v1]'
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
@@ -68,6 +74,25 @@ export interface SpillRef {
 
 export interface SpillSidecar extends SpillRef {
 	formatVersion: 1
+}
+
+/**
+ * Bound output for model-visible tool returns. Prefer a spill-backed preview;
+ * if spill storage is unavailable, still return a bounded head/tail preview
+ * instead of replaying an unbounded string into the next model request.
+ */
+export async function retainToolOutputForModel(
+	vault: Vault,
+	sessionId: string,
+	text: string,
+	meta: ToolOutputRetentionMeta = {},
+): Promise<string> {
+	const retention = new ToolOutputRetention(vault)
+	const retained = await retention.retain(sessionId, text, meta)
+	if (retained !== text) return retained
+	const preview = retainToolOutputText(text)
+	if (!preview.truncated) return text
+	return `${preview.preview}\n\n(Omitted ${preview.omittedBytes} bytes; spill storage unavailable.)`
 }
 
 export interface ToolOutputRetainer {
@@ -131,16 +156,28 @@ export function retainToolOutputText(
 
 /** Format the persisted notice appended to a retained preview. */
 export function formatSpillNotice(omittedBytes: number, ref: SpillRef): string {
-	return `(Omitted ${omittedBytes} bytes. Full result stored at: ${ref.locator}. ${ref.retrievalHint})`
+	return `${TOOL_OUTPUT_SPILL_NOTICE_MARK} (Omitted ${omittedBytes} bytes. Full result stored at: ${ref.locator}. ${ref.retrievalHint})`
 }
 
-/** Recognize a persisted spill notice without parsing its locator. */
+/** True when a generated, sentinel-backed spill notice is present. */
+export function hasSpillNoticeMark(text: string): boolean {
+	return text.includes(TOOL_OUTPUT_SPILL_NOTICE_MARK)
+}
+
+/** Recognize a persisted spill notice (current sentinel or legacy format). */
 export function hasSpillNotice(text: string): boolean {
 	return (
-		text.includes('(Omitted ') &&
-		text.includes(' Full result stored at: ') &&
-		text.trimEnd().endsWith(')')
+		hasSpillNoticeMark(text) ||
+		(text.includes('(Omitted ') &&
+			text.includes(' Full result stored at: ') &&
+			text.trimEnd().endsWith(')'))
 	)
+}
+
+/** Extract the spill locator from a notice, if one is present. */
+export function extractSpillLocator(text: string): string | undefined {
+	const match = /Full result stored at: (\S+)\.\s/.exec(text)
+	return match?.[1]
 }
 
 function safeSegment(raw: string) {
@@ -182,7 +219,13 @@ export async function spillToolOutput(
 ): Promise<SpillRef> {
 	const hash = await sha256Hex(encoder.encode(text))
 	const dir = await getSessionSpillDir(sessionId)
-	const locator = `${dir}/${randomToken()}-${safeSegment(meta.toolName ?? 'tool')}.txt`
+	// Tool calls get a deterministic locator so the projector's two retain
+	// passes (tool-execution-end + tool-results) converge on one spill file;
+	// the content hash keeps a retried call with different output separate.
+	const token = meta.toolCallId
+		? `${(await sha256Hex(encoder.encode(meta.toolCallId))).slice(0, 8)}-${hash.slice(0, 8)}`
+		: randomToken()
+	const locator = `${dir}/${token}-${safeSegment(meta.toolName ?? 'tool')}.txt`
 	const ref: SpillRef = {
 		locator,
 		retrievalHint: TOOL_OUTPUT_RETRIEVAL_HINT,
@@ -245,7 +288,27 @@ export class ToolOutputRetention implements ToolOutputRetainer {
 		text: string,
 		meta: ToolOutputRetentionMeta = {},
 	): Promise<string> {
-		if (text.length === 0 || hasSpillNotice(text)) return text
+		if (text.length === 0) return text
+		if (hasSpillNotice(text)) {
+			const locator = extractSpillLocator(text)
+			// A real retained preview is small and/or carries the sentinel.
+			// Do not trust an oversized output that merely contains the legacy
+			// notice strings: verify the referenced spill before skipping.
+			const structured = hasSpillNoticeMark(text)
+			const boundedPreview = encoder.encode(text).byteLength <= this.budgetBytes
+			if (locator && (structured || boundedPreview)) {
+				try {
+					if (
+						typeof this.vault.adapter.exists === 'function' &&
+						(await this.vault.adapter.exists(locator))
+					) {
+						return text
+					}
+				} catch {
+					/* Treat an unreadable adapter as "spill missing" and re-retain. */
+				}
+			}
+		}
 		const retained = retainToolOutputText(text, this.budgetBytes)
 		if (!retained.truncated) return text
 		try {

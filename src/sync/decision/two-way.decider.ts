@@ -1,21 +1,19 @@
-import { parse as bytesParse } from 'bytes-iec'
-import { hasInvalidChar } from '~/utils/has-invalid-char'
-import { isPluginSelfPath } from '~/utils/config-dir-rules'
-import { isSameTime } from '~/utils/is-same-time'
 import remotePathToAbsolute from '~/utils/remote-path-to-absolute'
-import { remotePathToLocalPath } from '~/utils/remote-path-to-local-path'
-import { hasFolderContentChanged } from '../core/has-folder-content-changed'
-import { areLooseEqualFiles } from '../core/loose-equality'
-import { getFileChanges, getRemoteFileChanged } from '../core/file-changes'
-import { shouldCreateCleanRecordTask } from '../core/record-cleanup'
-import { SkipReason } from '../tasks/skipped.task'
-import { BaseTask } from '../tasks/task.interface'
-import {
-	getIgnoredPathsInFolder,
-	hasIgnoredInFolder,
-} from '../utils/has-ignored-in-folder'
+import { shouldCreateCleanRecordTask } from '~/sync/core/record-cleanup'
+import { BaseTask } from '~/sync/tasks/task.interface'
 import BaseSyncDecider from './base.decider'
+import { pushFileTooLargeTask, resolveMaxFileSize } from './size-guard'
 import { SyncDecisionInput } from './sync-decision.interface'
+import {
+	decideFileWithRecord,
+	decideFileWithoutRecord,
+	TwoWayFileDecisionContext,
+} from './two-way-file-decision'
+import {
+	decideLocalFolders,
+	decideRemoteFolders,
+	TwoWayFolderDecisionContext,
+} from './two-way-folder-decision'
 
 export default class TwoWaySyncDecider extends BaseSyncDecider {
 	async decide(): Promise<BaseTask[]> {
@@ -24,6 +22,17 @@ export default class TwoWaySyncDecider extends BaseSyncDecider {
 	}
 }
 
+/**
+ * Two-way decider, split into a collect / decide / persist pipeline:
+ *
+ * 1. collect: resolve the size budget and index the walked local/remote stats;
+ * 2. decide: files (`two-way-file-decision`) then folders
+ *    (`two-way-folder-decision`);
+ * 3. persist: clean orphaned records and prepend the sorted folder tasks.
+ *
+ * The decision result object and task ordering are unchanged from the original
+ * single-function implementation.
+ */
 export async function twoWayDecider(
 	input: SyncDecisionInput,
 ): Promise<BaseTask[]> {
@@ -37,11 +46,8 @@ export async function twoWayDecider(
 		taskFactory,
 	} = input
 
-	let maxFileSize = Infinity
-	const maxFileSizeStr = settings.skipLargeFiles.maxSize.trim()
-	if (maxFileSizeStr !== '') {
-		maxFileSize = bytesParse(maxFileSizeStr, { mode: 'jedec' }) ?? Infinity
-	}
+	// * collect
+	const maxFileSize = resolveMaxFileSize(settings)
 
 	const localStatsFiltered = localStats
 		.filter((item) => !item.ignored)
@@ -72,14 +78,9 @@ export async function twoWayDecider(
 			remoteBaseDir,
 		}
 		if (remoteSize > maxFileSize) {
-			tasks.push(
-				taskFactory.createSkippedTask({
-					...taskOptions,
-					reason: SkipReason.FileTooLarge,
-					maxSize: maxFileSize,
-					remoteSize,
-				}),
-			)
+			pushFileTooLargeTask(tasks, taskFactory, taskOptions, maxFileSize, {
+				remoteSize,
+			})
 			return false
 		}
 		tasks.push(taskFactory.createRemoveRemoteTask(taskOptions))
@@ -93,372 +94,38 @@ export async function twoWayDecider(
 			remoteBaseDir,
 		}
 		if (localSize > maxFileSize) {
-			tasks.push(
-				taskFactory.createSkippedTask({
-					...taskOptions,
-					reason: SkipReason.FileTooLarge,
-					maxSize: maxFileSize,
-					localSize,
-				}),
-			)
+			pushFileTooLargeTask(tasks, taskFactory, taskOptions, maxFileSize, {
+				localSize,
+			})
 			return false
 		}
 		tasks.push(taskFactory.createRemoveLocalTask(taskOptions))
 		return true
 	}
 
-	// * sync files
+	// * decide: files
+	const fileCtx: TwoWayFileDecisionContext = {
+		input,
+		maxFileSize,
+		tasks,
+		removeRemoteFile,
+		removeLocalFile,
+	}
 	for (const p of mixedPath) {
 		const remote = remoteStatsMap.get(p)
 		const local = localStatsMap.get(p)
 		const record = syncRecords.get(p)
-		const options = {
-			remotePath: p,
-			localPath: p,
-			remoteBaseDir,
-		}
 		if (local?.isDir || remote?.isDir) {
 			continue
 		}
 		if (record) {
-			if (remote) {
-				const remoteChanged = getRemoteFileChanged(remote, record.remote)
-				if (local) {
-					const { localChanged } = await getFileChanges(
-						input,
-						local,
-						remote,
-						record,
-					)
-					if (remoteChanged) {
-						if (localChanged) {
-							logger.debug({
-								reason: 'both local and remote files changed',
-								remotePath: remotePathToAbsolute(remoteBaseDir, p),
-								localPath: p,
-								conditions: {
-									remoteChanged,
-									localChanged,
-									recordExists: !!record,
-									remoteExists: !!remote,
-									localExists: !!local,
-								},
-							})
-							if (remote.size > maxFileSize || local.size > maxFileSize) {
-								tasks.push(
-									taskFactory.createSkippedTask({
-										...options,
-										reason: SkipReason.FileTooLarge,
-										maxSize: maxFileSize,
-										remoteSize: remote.size,
-										localSize: local.size,
-									}),
-								)
-								continue
-							}
-
-							if (hasInvalidChar(local.path)) {
-								tasks.push(taskFactory.createFilenameErrorTask(options))
-							} else {
-								tasks.push(
-									taskFactory.createConflictResolveTask({
-										...options,
-										record,
-										strategy: settings.conflictStrategy,
-										localStat: local,
-										remoteStat: remote,
-										mobileAppDownloadFileChunkSize:
-											settings.mobileAppDownloadFileChunkSize,
-									}),
-								)
-							}
-
-							continue
-						} else {
-							logger.debug({
-								reason: 'remote file changed',
-								remotePath: remotePathToAbsolute(remoteBaseDir, p),
-								localPath: p,
-								conditions: {
-									remoteChanged,
-									recordExists: !!record,
-									remoteExists: !!remote,
-									localExists: !!local,
-								},
-							})
-							if (remote.size > maxFileSize || local.size > maxFileSize) {
-								tasks.push(
-									taskFactory.createSkippedTask({
-										...options,
-										reason: SkipReason.FileTooLarge,
-										maxSize: maxFileSize,
-										remoteSize: remote.size,
-										localSize: local.size,
-									}),
-								)
-								continue
-							}
-							tasks.push(
-								taskFactory.createPullTask({
-									...options,
-									remoteSize: remote.size,
-									mobileAppDownloadFileChunkSize:
-										settings.mobileAppDownloadFileChunkSize,
-								}),
-							)
-							continue
-						}
-					} else {
-						if (localChanged) {
-							logger.debug({
-								reason: 'local file changed',
-								remotePath: remotePathToAbsolute(remoteBaseDir, p),
-								localPath: p,
-								conditions: {
-									localChanged,
-									recordExists: !!record,
-									remoteExists: !!remote,
-									localExists: !!local,
-								},
-							})
-							if (local.size > maxFileSize || remote.size > maxFileSize) {
-								tasks.push(
-									taskFactory.createSkippedTask({
-										...options,
-										reason: SkipReason.FileTooLarge,
-										maxSize: maxFileSize,
-										remoteSize: remote.size,
-										localSize: local.size,
-									}),
-								)
-								continue
-							}
-							if (hasInvalidChar(local.path)) {
-								tasks.push(taskFactory.createFilenameErrorTask(options))
-							} else {
-								tasks.push(taskFactory.createPushTask(options))
-							}
-							continue
-						}
-					}
-				} else {
-					if (remoteChanged) {
-						logger.debug({
-							reason: 'remote file changed and local file does not exist',
-							remotePath: remotePathToAbsolute(remoteBaseDir, p),
-							localPath: p,
-							conditions: {
-								remoteChanged,
-								recordExists: !!record,
-								remoteExists: !!remote,
-								localExists: !!local,
-							},
-						})
-						if (remote.size > maxFileSize) {
-							tasks.push(
-								taskFactory.createSkippedTask({
-									...options,
-									reason: SkipReason.FileTooLarge,
-									maxSize: maxFileSize,
-									remoteSize: remote.size,
-								}),
-							)
-							continue
-						}
-						tasks.push(
-							taskFactory.createPullTask({
-								...options,
-								remoteSize: remote.size,
-								mobileAppDownloadFileChunkSize:
-									settings.mobileAppDownloadFileChunkSize,
-							}),
-						)
-						continue
-					} else {
-						logger.debug({
-							reason: 'remote file is removable',
-							remotePath: remotePathToAbsolute(remoteBaseDir, p),
-							localPath: p,
-							conditions: {
-								recordExists: !!record,
-								remoteExists: !!remote,
-								localExists: !!local,
-							},
-						})
-						removeRemoteFile(p, remote.size)
-						continue
-					}
-				}
-			} else if (local) {
-				if (isPluginSelfPath(p, settings.configDir)) {
-					logger.debug({
-						reason: 'plugin self-path missing remotely — preserve local',
-						remotePath: remotePathToAbsolute(remoteBaseDir, p),
-						localPath: p,
-					})
-					continue
-				}
-				const localChanged = !isSameTime(local.mtime, record.local.mtime)
-				if (localChanged) {
-					logger.debug({
-						reason: 'local file changed and remote file does not exist',
-						remotePath: remotePathToAbsolute(remoteBaseDir, p),
-						localPath: p,
-						conditions: {
-							localChanged,
-							recordExists: !!record,
-							remoteExists: !!remote,
-							localExists: !!local,
-						},
-					})
-					if (local.size > maxFileSize) {
-						tasks.push(
-							taskFactory.createSkippedTask({
-								...options,
-								reason: SkipReason.FileTooLarge,
-								localSize: local.size,
-								maxSize: maxFileSize,
-							}),
-						)
-						continue
-					}
-					if (hasInvalidChar(local.path)) {
-						tasks.push(taskFactory.createFilenameErrorTask(options))
-					} else {
-						tasks.push(taskFactory.createPushTask(options))
-					}
-					continue
-				} else {
-					logger.debug({
-						reason: 'local file is removable',
-						remotePath: remotePathToAbsolute(remoteBaseDir, p),
-						localPath: p,
-						conditions: {
-							recordExists: !!record,
-							remoteExists: !!remote,
-							localExists: !!local,
-						},
-					})
-					removeLocalFile(p, local.size)
-					continue
-				}
-			}
+			await decideFileWithRecord(fileCtx, p, local, remote, record)
 		} else {
-			if (remote) {
-				if (local) {
-					if (areLooseEqualFiles(settings.syncMode, local, remote)) {
-						tasks.push(taskFactory.createNoopTask(options))
-						continue
-					}
-					logger.debug({
-						reason: 'both local and remote files exist without a record',
-						remotePath: remotePathToAbsolute(remoteBaseDir, p),
-						localPath: p,
-						conditions: {
-							recordExists: !!record,
-							remoteExists: !!remote,
-							localExists: !!local,
-						},
-					})
-
-					if (remote.size > maxFileSize || local.size > maxFileSize) {
-						tasks.push(
-							taskFactory.createSkippedTask({
-								...options,
-								reason: SkipReason.FileTooLarge,
-								remoteSize: remote.size,
-								localSize: local.size,
-								maxSize: maxFileSize,
-							}),
-						)
-						continue
-					}
-
-					if (hasInvalidChar(local.path)) {
-						tasks.push(taskFactory.createFilenameErrorTask(options))
-					} else {
-						tasks.push(
-							taskFactory.createConflictResolveTask({
-								...options,
-								strategy: settings.conflictStrategy,
-								localStat: local,
-								remoteStat: remote,
-								mobileAppDownloadFileChunkSize:
-									settings.mobileAppDownloadFileChunkSize,
-							}),
-						)
-					}
-
-					continue
-				} else {
-					logger.debug({
-						reason: 'remote file exists without a local file',
-						remotePath: remotePathToAbsolute(remoteBaseDir, p),
-						localPath: p,
-						conditions: {
-							recordExists: !!record,
-							remoteExists: !!remote,
-							localExists: !!local,
-						},
-					})
-
-					if (remote.size > maxFileSize) {
-						tasks.push(
-							taskFactory.createSkippedTask({
-								...options,
-								reason: SkipReason.FileTooLarge,
-								remoteSize: remote.size,
-								maxSize: maxFileSize,
-							}),
-						)
-						continue
-					}
-					tasks.push(
-						taskFactory.createPullTask({
-							...options,
-							remoteSize: remote.size,
-							mobileAppDownloadFileChunkSize:
-								settings.mobileAppDownloadFileChunkSize,
-						}),
-					)
-					continue
-				}
-			} else {
-				if (local) {
-					logger.debug({
-						reason: 'local file exists without a remote file',
-						remotePath: remotePathToAbsolute(remoteBaseDir, p),
-						localPath: p,
-						conditions: {
-							recordExists: !!record,
-							remoteExists: !!remote,
-							localExists: !!local,
-						},
-					})
-
-					if (local.size > maxFileSize) {
-						tasks.push(
-							taskFactory.createSkippedTask({
-								...options,
-								reason: SkipReason.FileTooLarge,
-								localSize: local.size,
-								maxSize: maxFileSize,
-							}),
-						)
-						continue
-					}
-					if (hasInvalidChar(local.path)) {
-						tasks.push(taskFactory.createFilenameErrorTask(options))
-					} else {
-						tasks.push(taskFactory.createPushTask(options))
-					}
-					continue
-				}
-			}
+			decideFileWithoutRecord(fileCtx, p, local, remote, record)
 		}
 	}
 
-	// * clean orphaned records (both local and remote deleted)
+	// * decide: clean orphaned records (both local and remote deleted)
 	for (const [recordPath, record] of syncRecords) {
 		if (shouldCreateCleanRecordTask(recordPath, localStats, remoteStats)) {
 			logger.debug({
@@ -482,273 +149,26 @@ export async function twoWayDecider(
 		}
 	}
 
-	// * sync folder: remote -> local
-	for (const remote of remoteStatsFiltered) {
-		if (!remote.isDir) {
-			continue
-		}
-		const localPath = remotePathToLocalPath(remoteBaseDir, remote.path)
-		const local = localStatsMap.get(localPath)
-		const record = syncRecords.get(localPath)
-		if (local) {
-			if (!local.isDir) {
-				throw new Error(
-					`Folder conflict: remote path ${remote.path} is a folder but local path ${localPath} is a file`,
-				)
-			}
-			if (!record) {
-				noopFolderTasks.push(
-					taskFactory.createNoopTask({
-						localPath: localPath,
-						remotePath: remote.path,
-						remoteBaseDir,
-					}),
-				)
-				continue
-			}
-		} else if (record) {
-			const remoteChanged = hasFolderContentChanged(
-				remote.path,
-				remoteStatsFiltered,
-				syncRecords,
-				'remote',
-			)
-
-			if (remoteChanged) {
-				logger.debug({
-					reason: 'remote folder content changed',
-					remotePath: remotePathToAbsolute(remoteBaseDir, remote.path),
-					localPath: localPath,
-					conditions: {
-						remoteChanged,
-						localExists: !!local,
-						recordExists: !!record,
-					},
-				})
-
-				mkdirLocalTasks.push(
-					taskFactory.createMkdirLocalTask({
-						localPath,
-						remotePath: remote.path,
-						remoteBaseDir,
-					}),
-				)
-				continue
-			}
-
-			if (hasIgnoredInFolder(remote.path, remoteStats)) {
-				const ignoredPaths = getIgnoredPathsInFolder(remote.path, remoteStats)
-				logger.debug({
-					reason: 'skip removing remote folder (contains ignored items)',
-					remotePath: remotePathToAbsolute(remoteBaseDir, remote.path),
-					localPath: localPath,
-					conditions: {
-						hasIgnoredItems: true,
-						localExists: !!local,
-						recordExists: !!record,
-					},
-					ignoredPaths,
-				})
-				tasks.push(
-					taskFactory.createSkippedTask({
-						localPath,
-						remotePath: remote.path,
-						remoteBaseDir,
-						reason: SkipReason.FolderContainsIgnoredItems,
-						ignoredPaths,
-					}),
-				)
-				continue
-			}
-
-			logger.debug({
-				reason: 'remote folder is removable (no content changes)',
-				remotePath: remotePathToAbsolute(remoteBaseDir, remote.path),
-				localPath: localPath,
-				conditions: {
-					removable: true,
-					localExists: !!local,
-					recordExists: !!record,
-				},
-			})
-			removeRemoteFolderTasks.push(
-				taskFactory.createRemoveRemoteTask({
-					localPath: remote.path,
-					remotePath: remote.path,
-					remoteBaseDir,
-				}),
-			)
-			continue
-		} else {
-			logger.debug({
-				reason: 'remote folder does not exist locally',
-				remotePath: remotePathToAbsolute(remoteBaseDir, remote.path),
-				localPath: localPath,
-				conditions: {
-					localExists: !!local,
-					recordExists: !!record,
-				},
-			})
-
-			mkdirLocalTasks.push(
-				taskFactory.createMkdirLocalTask({
-					localPath,
-					remotePath: remote.path,
-					remoteBaseDir,
-				}),
-			)
-
-			continue
-		}
+	// * decide: folders
+	const folderCtx: TwoWayFolderDecisionContext = {
+		input,
+		localStats,
+		remoteStats,
+		localStatsFiltered,
+		remoteStatsFiltered,
+		localStatsMap,
+		remoteStatsMap,
+		tasks,
+		removeRemoteFolderTasks,
+		removeLocalFolderTasks,
+		mkdirLocalTasks,
+		mkdirRemoteTasks,
+		noopFolderTasks,
 	}
+	decideRemoteFolders(folderCtx)
+	decideLocalFolders(folderCtx)
 
-	// * sync folder: local -> remote
-	for (const local of localStatsFiltered) {
-		if (!local.isDir) {
-			continue
-		}
-		const remote = remoteStatsMap.get(local.path)
-		const record = syncRecords.get(local.path)
-		if (remote) {
-			if (!record) {
-				noopFolderTasks.push(
-					taskFactory.createNoopTask({
-						localPath: local.path,
-						remotePath: remote.path,
-						remoteBaseDir,
-					}),
-				)
-				continue
-			}
-		} else {
-			if (record) {
-				if (isPluginSelfPath(local.path, settings.configDir)) {
-					logger.debug({
-						reason: 'plugin self-folder missing remotely — preserve local',
-						remotePath: remotePathToAbsolute(remoteBaseDir, local.path),
-						localPath: local.path,
-					})
-					continue
-				}
-				const localChanged = hasFolderContentChanged(
-					local.path,
-					localStatsFiltered,
-					syncRecords,
-					'local',
-				)
-
-				if (localChanged) {
-					logger.debug({
-						reason: 'local folder content changed',
-						remotePath: remotePathToAbsolute(remoteBaseDir, local.path),
-						localPath: local.path,
-						conditions: {
-							localChanged,
-							remoteExists: !!remote,
-							recordExists: !!record,
-						},
-					})
-					if (hasInvalidChar(local.path)) {
-						tasks.push(
-							taskFactory.createFilenameErrorTask({
-								localPath: local.path,
-								remotePath: local.path,
-								remoteBaseDir,
-							}),
-						)
-					} else {
-						mkdirRemoteTasks.push(
-							taskFactory.createMkdirRemoteTask({
-								localPath: local.path,
-								remotePath: local.path,
-								remoteBaseDir,
-							}),
-						)
-					}
-					continue
-				}
-
-				if (hasIgnoredInFolder(local.path, localStats)) {
-					const ignoredPaths = getIgnoredPathsInFolder(local.path, localStats)
-					logger.debug({
-						reason: 'skip removing local folder (contains ignored items)',
-						remotePath: remotePathToAbsolute(remoteBaseDir, local.path),
-						localPath: local.path,
-						conditions: {
-							hasIgnoredItems: true,
-							remoteExists: !!remote,
-							recordExists: !!record,
-						},
-						ignoredPaths,
-					})
-					tasks.push(
-						taskFactory.createSkippedTask({
-							localPath: local.path,
-							remotePath: local.path,
-							remoteBaseDir,
-							reason: SkipReason.FolderContainsIgnoredItems,
-							ignoredPaths,
-						}),
-					)
-					continue
-				}
-
-				logger.debug({
-					reason: 'local folder is removable (no content changes)',
-					remotePath: remotePathToAbsolute(remoteBaseDir, local.path),
-					localPath: local.path,
-					conditions: {
-						removable: true,
-						remoteExists: !!remote,
-						recordExists: !!record,
-					},
-				})
-				removeLocalFolderTasks.push(
-					taskFactory.createRemoveLocalTask({
-						localPath: local.path,
-						remotePath: local.path,
-						remoteBaseDir,
-						recursive: true,
-					}),
-				)
-			} else {
-				logger.debug({
-					reason: 'local folder does not exist remotely',
-					remotePath: remotePathToAbsolute(remoteBaseDir, local.path),
-					localPath: local.path,
-					conditions: {
-						remoteExists: !!remote,
-						recordExists: !!record,
-					},
-				})
-				if (hasInvalidChar(local.path)) {
-					tasks.push(
-						taskFactory.createFilenameErrorTask({
-							localPath: local.path,
-							remotePath: local.path,
-							remoteBaseDir,
-						}),
-					)
-				} else {
-					mkdirRemoteTasks.push(
-						taskFactory.createMkdirRemoteTask({
-							localPath: local.path,
-							remotePath: local.path,
-							remoteBaseDir,
-						}),
-					)
-				}
-				continue
-			}
-			continue
-		}
-		if (!remote.isDir) {
-			throw new Error(
-				`Folder conflict: local path ${local.path} is a folder but remote path ${remote.path} is a file`,
-			)
-		}
-	}
-
+	// * persist
 	removeRemoteFolderTasks.sort(
 		(a, b) => b.remotePath.length - a.remotePath.length,
 	)

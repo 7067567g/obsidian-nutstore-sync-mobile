@@ -1,61 +1,32 @@
-import { Mutex } from 'async-mutex'
 import { dirname, normalize } from 'path-browserify'
 import { DeltaEntry, getDelta } from '~/api/delta'
-import { getLatestDeltaCursor } from '~/api/latestDeltaCursor'
+import { getLatestDeltaCursor } from '~/api/latest-delta-cursor'
 import { getDirectoryContents } from '~/api/webdav'
 import { StatModel } from '~/model/stat.model'
 import type { NutstoreSettings } from '~/settings'
-import { traverseWebDAVKV } from '~/storage'
 import { apiLimiter } from './api-limiter'
 import { fileStatToStatModel } from './file-stat-to-stat-model'
 import { getRootFolderName } from './get-root-folder-name'
-import { is503Error } from './is-503-error'
 import logger from './logger'
-import sleep from './sleep'
 import { stdRemotePath } from './std-remote-path'
-import { isTraversalCacheCompatible } from './traversal-cache-compat'
+import { executeWithRetry, getTraversalLock } from './traverse-webdav-retry'
+import {
+	clearTraversalState,
+	isTraversalStateValid,
+	loadTraversalState,
+	saveTraversalState,
+} from './traverse-webdav-state'
 import { MaybePromise } from './types'
 
 const getContents = apiLimiter.wrap(getDirectoryContents)
 
-// Global mutex map: one lock per kvKey
-const traversalLocks = new Map<string, Mutex>()
-
-function getTraversalLock(kvKey: string): Mutex {
-	if (!traversalLocks.has(kvKey)) {
-		traversalLocks.set(kvKey, new Mutex())
-	}
-	return traversalLocks.get(kvKey)!
-}
-
-async function executeWithRetry<T>(
-	func: () => MaybePromise<T>,
-	options: {
-		onRetry?: () => void
-		throwIfCancelled?: () => void
-	} = {},
-): Promise<T> {
-	while (true) {
-		options.throwIfCancelled?.()
-		try {
-			return await func()
-		} catch (err) {
-			const normalizedError =
-				err instanceof Error || typeof err === 'string'
-					? err
-					: new Error(String(err))
-			if (is503Error(normalizedError)) {
-				options.onRetry?.()
-				for (let waited = 0; waited < 30_000; waited += 500) {
-					options.throwIfCancelled?.()
-					await sleep(500)
-				}
-			} else {
-				throw err
-			}
-		}
-	}
-}
+/**
+ * WS-5 / H9 (K20 negative-result freshness bound): an empty directory listing
+ * is a negative result. It may be served from cache, but only within this
+ * explicit upper bound; afterwards the directory is re-listed. Non-empty
+ * listings are kept authoritative (the delta stream maintains them).
+ */
+const DEFAULT_EMPTY_DIR_REVALIDATE_MS = 5 * 60_000
 
 export interface WebDAVTraversalProgress {
 	phase: 'scanning' | 'incremental' | 'retrying' | 'complete'
@@ -78,6 +49,15 @@ export class ResumableWebDAVTraversal {
 	private rootCursor: string = ''
 	private queue: string[] = []
 	private nodes: Record<string, StatModel[]> = {}
+	/**
+	 * Directories whose listing we fetched (or refreshed) in this process.
+	 * `nodes[dir]` keys alone cannot distinguish "listed and truly empty" from
+	 * "exists but never listed" — the H9 bug fabricated `[]` for delta-created
+	 * directories. This in-memory set (K19/K20) is the sentinel that makes an
+	 * empty node trustworthy only after a real listing, and only while fresh.
+	 */
+	private readonly listedDirs = new Map<string, number>()
+	private emptyDirRevalidateMs = DEFAULT_EMPTY_DIR_REVALIDATE_MS
 	private processedCount: number = 0
 	private discoveredCount: number = 0
 	private processedChanges: number = 0
@@ -155,6 +135,40 @@ export class ResumableWebDAVTraversal {
 		return this.rootCursor
 	}
 
+	/**
+	 * H9 / K19+K20: only a real listing may satisfy the BFS cache short-circuit.
+	 * An empty node is usable only if this process listed it and the negative
+	 * result is still inside the freshness bound.
+	 */
+	private isCachedListingUsable(dirPath: string, items: StatModel[]): boolean {
+		if (items.length > 0) return true
+		const listedAt = this.listedDirs.get(dirPath)
+		if (listedAt === undefined) return false
+		return Date.now() - listedAt < this.emptyDirRevalidateMs
+	}
+
+	private markDirectoryListed(dirPath: string) {
+		this.listedDirs.delete(dirPath)
+		this.listedDirs.set(dirPath, Date.now())
+	}
+
+	/**
+	 * H9: a newly observed directory must be listed before its (empty) node is
+	 * trusted. Queue it once so the next BFS pass fetches its real contents.
+	 */
+	private enqueueDirectoryForListing(path: string): void {
+		const normalized = this.normalizeDirPath(path)
+		if (normalized === this.normalizeDirPath(this.remoteBaseDir)) return
+		const alreadyQueued = this.queue.some(
+			(queued) => this.normalizeDirPath(queued) === normalized,
+		)
+		if (!alreadyQueued) this.queue.push(path)
+	}
+
+	private resetDirectoryListings() {
+		this.listedDirs.clear()
+	}
+
 	async traverse(): Promise<StatModel[]> {
 		return await this.lock.runExclusive(async () => {
 			this.checkCancelled()
@@ -209,7 +223,10 @@ export class ResumableWebDAVTraversal {
 				try {
 					const cachedItems = this.nodes[normalizedPath]
 
-					if (cachedItems) {
+					if (
+						cachedItems &&
+						this.isCachedListingUsable(normalizedPath, cachedItems)
+					) {
 						resultItems.push(...cachedItems)
 					} else {
 						const contents = await this.executeWithRetry(
@@ -222,6 +239,9 @@ export class ResumableWebDAVTraversal {
 							resultItems.push(stat)
 						}
 						this.discoveredCount += resultItems.length
+						// Only a fetched listing makes `nodes[dir]` authoritative,
+						// including the empty (negative) case.
+						this.markDirectoryListed(normalizedPath)
 					}
 
 					results.push(...resultItems)
@@ -348,6 +368,7 @@ export class ResumableWebDAVTraversal {
 				this.nodes = {}
 				this.queue = [this.remoteBaseDir]
 				this.processedCount = 0
+				this.resetDirectoryListings()
 				const { response: cursorResponse } = await this.executeWithRetry(() =>
 					getLatestDeltaCursor({
 						token: this.token,
@@ -394,6 +415,7 @@ export class ResumableWebDAVTraversal {
 				this.queue = [this.remoteBaseDir]
 				this.nodes = {}
 				this.processedCount = 0
+				this.resetDirectoryListings()
 				return await this.bfsTraverse()
 			}
 
@@ -468,6 +490,7 @@ export class ResumableWebDAVTraversal {
 							nodePath.startsWith(normalizedEntryPath)
 						) {
 							delete this.nodes[nodePath]
+							this.listedDirs.delete(nodePath)
 						}
 					}
 				} else {
@@ -504,8 +527,17 @@ export class ResumableWebDAVTraversal {
 						}
 					}
 
-					if (!this.nodes[normalizedEntryPath]) {
-						this.nodes[normalizedEntryPath] = []
+					// H9 / K19: a delta entry proves the directory exists but not
+					// what it contains. Do NOT fabricate `nodes[dir] = []`; that
+					// empty array would make BFS treat the directory as already
+					// listed and permanently hide its existing children. Queue a
+					// real listing instead.
+					const knownListing = this.nodes[normalizedEntryPath]
+					if (
+						!this.listedDirs.has(normalizedEntryPath) &&
+						(knownListing === undefined || knownListing.length === 0)
+					) {
+						this.enqueueDirectoryForListing(entry.path)
 					}
 				}
 			} else {
@@ -590,45 +622,48 @@ export class ResumableWebDAVTraversal {
 	 * Load state
 	 */
 	private async loadState(): Promise<void> {
-		const cache = await traverseWebDAVKV.get(this.kvKey)
-		if (cache) {
-			if (!isTraversalCacheCompatible(cache, this.remoteBaseDir)) {
-				logger.warn(
-					'Discarding incompatible traversal cache for current remote directory',
-				)
-				await traverseWebDAVKV.unset(this.kvKey)
-				this.rootCursor = ''
-				this.queue = []
-				this.nodes = {}
-				return
-			}
-			this.rootCursor = cache.rootCursor || ''
-			this.queue = cache.queue || []
-			this.nodes = cache.nodes || {}
-			this.processedCount = Object.keys(this.nodes).length
-			this.discoveredCount = this.countDiscoveredItems()
+		const state = await loadTraversalState(this.kvKey, this.remoteBaseDir)
+		if (state.kind === 'empty') {
+			return
 		}
+		if (state.kind === 'incompatible') {
+			this.rootCursor = ''
+			this.queue = []
+			this.nodes = {}
+			this.resetDirectoryListings()
+			return
+		}
+		this.rootCursor = state.rootCursor
+		this.queue = state.queue
+		this.nodes = state.nodes
+		// H9: freshness is process-local, a restored cache has no listed-dir
+		// sentinel, so empty nodes are re-listed on the next BFS.
+		this.resetDirectoryListings()
+		this.processedCount = Object.keys(this.nodes).length
+		this.discoveredCount = this.countDiscoveredItems()
 	}
 
 	/**
 	 * Save current state
 	 */
 	private async saveState(): Promise<void> {
-		await traverseWebDAVKV.set(this.kvKey, {
-			rootCursor: this.rootCursor,
-			queue: this.queue,
-			nodes: this.nodes,
-		})
+		await saveTraversalState(
+			this.kvKey,
+			this.rootCursor,
+			this.queue,
+			this.nodes,
+		)
 	}
 
 	/**
 	 * Clear cache (force re-traversal)
 	 */
 	async clearCache(): Promise<void> {
-		await traverseWebDAVKV.unset(this.kvKey)
+		await clearTraversalState(this.kvKey)
 		this.rootCursor = ''
 		this.queue = []
 		this.nodes = {}
+		this.resetDirectoryListings()
 		this.processedCount = 0
 		this.discoveredCount = 0
 		this.processedChanges = 0
@@ -638,12 +673,6 @@ export class ResumableWebDAVTraversal {
 	 * Check if cache is valid
 	 */
 	async isCacheValid(): Promise<boolean> {
-		const cache = await traverseWebDAVKV.get(this.kvKey)
-		if (!cache) {
-			return false
-		}
-
-		// Cache is valid if queue is empty (traversal completed)
-		return cache.queue.length === 0
+		return await isTraversalStateValid(this.kvKey)
 	}
 }

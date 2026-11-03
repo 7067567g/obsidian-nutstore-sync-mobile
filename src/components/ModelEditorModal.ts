@@ -2,30 +2,16 @@ import { cloneDeep } from 'lodash-es'
 import { Modal, Notice, Setting, type TextComponent } from 'obsidian'
 import { findPresetModelById } from '~/ai/catalog/config'
 import { AIModelConfig } from '~/ai/core/types'
-import {
-	applyObsidianModalMountTarget,
-	type ChatModalMountTarget,
-} from '~/ai/chat/ui/modal-mount'
+import { applyObsidianModalMountTarget } from '~/ai/chat/ui/modal-mount'
 import i18n from '~/i18n'
 import { addClassTokens, toggleClassTokens } from '~/utils/class-tokens'
 import { parseTokenLimitInput } from '~/utils/token-limit'
 import logger from '~/utils/logger'
-import type NutstorePlugin from '..'
-
-interface ModelEditorOptions {
-	findPresetOnSave?: boolean
-	presetProviderApi?: string
-	modalMountTarget?: ChatModalMountTarget
-}
-
-const INPUT_MODALITY_OPTIONS: AIModelConfig['modalities']['input'] = [
-	'text',
-	'image',
-	'pdf',
-	'video',
-	'audio',
-	'file',
-]
+import type NutstorePlugin from '~/index'
+import {
+	INPUT_MODALITY_OPTIONS,
+	type ModelEditorOptions,
+} from './model-editor-modal.options'
 
 export default class ModelEditorModal extends Modal {
 	private draft: AIModelConfig

@@ -1,7 +1,7 @@
 import type { AppUIMessage, ChatSubmission } from '~/ai/chat/types'
 import { copyUserContextItems } from '~/ai/chat/context/user-context'
 import createId from '~/utils/create-id'
-import type { SessionRuntimeState } from '~/ai/chat/runtime/chat-state'
+import type { SessionRuntimeState } from './chat-state'
 
 export interface TaskOrigin {
 	turnId: string
@@ -29,6 +29,13 @@ export type MasterTurn =
 export interface ActiveMasterTurn {
 	turn: MasterTurn
 	abortController: AbortController
+}
+
+export interface QueuedUserSubmission {
+	/** Runtime-only identity; equals the queued MasterTurn.turnId. */
+	id: string
+	text: string
+	userContext: ChatSubmission['userContext']
 }
 
 export interface MasterTurnScheduler {
@@ -164,8 +171,63 @@ export function hasQueuedTurns(runtime: SessionRuntimeState) {
 	return runtime.scheduler.queued.length > 0
 }
 
-export function getQueuedUserSubmissions(runtime: SessionRuntimeState) {
+export function getQueuedUserSubmissions(
+	runtime: SessionRuntimeState,
+): QueuedUserSubmission[] {
 	return runtime.scheduler.queued.flatMap((turn) =>
-		turn.kind === 'user-submission' ? [turn.submission] : [],
+		turn.kind === 'user-submission'
+			? [
+					{
+						id: turn.turnId,
+						text: turn.submission.text,
+						userContext: copyUserContextItems(turn.submission.userContext),
+					},
+				]
+			: [],
 	)
+}
+
+function mergeUserSubmissions(
+	submissions: readonly ChatSubmission[],
+): ChatSubmission {
+	return {
+		text: submissions
+			.map((submission) => submission.text.trim())
+			.filter(Boolean)
+			.join('\n\n'),
+		userContext: submissions.flatMap((submission) =>
+			copyUserContextItems(submission.userContext),
+		),
+	}
+}
+
+export function removeQueuedUserSubmission(
+	runtime: SessionRuntimeState,
+	turnId: string,
+): boolean {
+	const index = runtime.scheduler.queued.findIndex(
+		(turn) => turn.kind === 'user-submission' && turn.turnId === turnId,
+	)
+	if (index === -1) return false
+	runtime.scheduler.queued.splice(index, 1)
+	return true
+}
+
+/** Merge adjacent user submissions in place; agent-input/regenerate are barriers. */
+export function coalesceQueuedUserSubmissions(runtime: SessionRuntimeState) {
+	const queue = runtime.scheduler.queued
+	for (let index = 0; index < queue.length; index += 1) {
+		const head = queue[index]
+		if (head.kind !== 'user-submission') continue
+		let end = index
+		while (queue[end + 1]?.kind === 'user-submission') end += 1
+		if (end === index) continue
+		const group = queue.slice(index, end + 1) as Array<
+			Extract<MasterTurn, { kind: 'user-submission' }>
+		>
+		queue.splice(index, end - index + 1, {
+			...head,
+			submission: mergeUserSubmissions(group.map((turn) => turn.submission)),
+		})
+	}
 }

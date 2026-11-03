@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { SyncMode } from '~/settings'
-import type { ConflictStrategy } from '../tasks/conflict-resolve.task'
-import { getFileChanges } from '../core/file-changes'
+import type { ConflictStrategy } from '~/sync/tasks/conflict-resolve.task'
+import { getFileChanges } from '~/sync/core/file-changes'
 import { sendOnlyDecider } from './send-only.decider'
 import { receiveOnlyDecider } from './receive-only.decider'
 import { twoWayDecider } from './two-way.decider'
@@ -12,7 +12,7 @@ vi.mock('~/settings', () => ({
 	SyncMode: { LOOSE: 'loose', STRICT: 'strict' },
 }))
 vi.mock('./base.decider', () => ({ default: class {} }))
-vi.mock('../tasks/task.interface', () => ({ BaseTask: class {} }))
+vi.mock('~/sync/tasks/task.interface', () => ({ BaseTask: class {} }))
 
 function fixture(path: string, content: string, remoteChanged = false) {
 	const bytes = new TextEncoder().encode(content)

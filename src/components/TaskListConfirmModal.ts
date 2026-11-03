@@ -5,8 +5,8 @@ import {
 	mountTaskSelectionVirtualList,
 	type TaskSelectionItem,
 	type TaskSelectionVirtualListController,
-} from '../components/solid-js'
-import { BaseTask } from '../sync/tasks/task.interface'
+} from './solid-js'
+import { BaseTask } from '~/sync/tasks/task.interface'
 
 export default class TaskListConfirmModal extends Modal {
 	private result: boolean = false

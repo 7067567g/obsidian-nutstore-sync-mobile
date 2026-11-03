@@ -5,7 +5,8 @@ import {
 	EXPLORER_AGENT_ID,
 	filterToolsForAgent,
 	MASTER_AGENT_ID,
-	MEMORY_AGENT_ID,
+	validateAgentDefinitions,
+	type AgentDefinition,
 } from './registry'
 
 function findDefinition(
@@ -18,14 +19,14 @@ function findDefinition(
 }
 
 describe('createAgentDefinitions', () => {
-	it('rebuilds definitions from current settings without elevating explorer', () => {
+	it('keeps explorer read-only regardless of full access', () => {
 		const askDefinitions = createAgentDefinitions({
 			fullAccess: false,
-			subagents: { explorer: { enabled: true }, memory: { enabled: true } },
+			subagents: { explorer: { enabled: true } },
 		})
 		const fullDefinitions = createAgentDefinitions({
 			fullAccess: true,
-			subagents: { explorer: { enabled: true }, memory: { enabled: true } },
+			subagents: { explorer: { enabled: true } },
 		})
 
 		expect(fullDefinitions).not.toBe(askDefinitions)
@@ -38,22 +39,17 @@ describe('createAgentDefinitions', () => {
 		expect(
 			findDefinition(fullDefinitions, EXPLORER_AGENT_ID).permissionMode,
 		).toBe('readonly')
-		expect(findDefinition(askDefinitions, MEMORY_AGENT_ID)).toMatchObject({
-			permissionMode: 'ask',
-			dispatchable: true,
-			tools: ['bash'],
-		})
-		expect(
-			findDefinition(fullDefinitions, MEMORY_AGENT_ID).permissionMode,
-		).toBe('full')
 	})
 
-	it('keeps disabled agents addressable without exposing task', () => {
+	it('has no memory subagent; master owns the memory tool', () => {
 		const definitions = createAgentDefinitions({ fullAccess: false })
-		const memory = findDefinition(definitions, MEMORY_AGENT_ID)
-
-		expect(memory.dispatchable).toBe(false)
-		expect(memory.systemPrompt).toContain('<memory-protocol>')
+		expect(definitions.map((definition) => definition.id)).toEqual([
+			MASTER_AGENT_ID,
+			EXPLORER_AGENT_ID,
+		])
+		expect(findDefinition(definitions, MASTER_AGENT_ID).tools).toContain(
+			'memory',
+		)
 		expect(findDefinition(definitions, EXPLORER_AGENT_ID).dispatchable).toBe(
 			false,
 		)
@@ -62,21 +58,54 @@ describe('createAgentDefinitions', () => {
 		)
 	})
 
-	it('exposes only enabled subagent types and task tools', () => {
+	it('bounds explorer recursion and tool calls per turn', () => {
 		const definitions = createAgentDefinitions({
 			fullAccess: false,
-			subagents: { explorer: { enabled: false }, memory: { enabled: true } },
+			subagents: { explorer: { enabled: true } },
 		})
+		const explorer = findDefinition(definitions, EXPLORER_AGENT_ID)
+		expect(explorer.maxToolCallsPerTurn).toBe(32)
+		expect(explorer.maxTaskDepth).toBe(2)
+	})
 
-		expect(
-			definitions
-				.filter((definition) => definition.dispatchable)
-				.map((definition) => definition.id),
-		).toEqual([MEMORY_AGENT_ID])
-		expect(findDefinition(definitions, MASTER_AGENT_ID).tools).toContain('task')
-		expect(findDefinition(definitions, EXPLORER_AGENT_ID).tools).toContain(
+	it('exposes explorer and task only when enabled', () => {
+		const disabled = createAgentDefinitions({ fullAccess: false })
+		expect(disabled.filter((definition) => definition.dispatchable)).toEqual([])
+		expect(findDefinition(disabled, MASTER_AGENT_ID).tools).not.toContain(
 			'task',
 		)
+
+		const enabled = createAgentDefinitions({
+			fullAccess: false,
+			subagents: { explorer: { enabled: true } },
+		})
+		expect(
+			enabled
+				.filter((definition) => definition.dispatchable)
+				.map((definition) => definition.id),
+		).toEqual([EXPLORER_AGENT_ID])
+		expect(findDefinition(enabled, MASTER_AGENT_ID).tools).toContain('task')
+	})
+
+	it('rejects unknown or empty tool filters at startup', () => {
+		const unknown: AgentDefinition = {
+			id: 'unknown',
+			description: 'test',
+			systemPrompt: '',
+			tools: ['vault_read'],
+			permissionMode: 'readonly',
+			dispatchable: false,
+			toolFilter: { deny: ['not_a_real_tool'] },
+		}
+		expect(() => validateAgentDefinitions([unknown])).toThrow(
+			'unknown tool "not_a_real_tool"',
+		)
+
+		const empty: AgentDefinition = {
+			...unknown,
+			toolFilter: { allow: [], deny: [] },
+		}
+		expect(() => validateAgentDefinitions([empty])).toThrow('empty toolFilter')
 	})
 })
 
@@ -84,6 +113,7 @@ describe('filterToolsForAgent', () => {
 	it('keeps mcp-prefixed tools while filtering unknown built-in tools', () => {
 		const tools = {
 			bash: {},
+			memory: {},
 			unknown_builtin: {},
 			'mcp__notes-search__find_notes': {},
 			mcp__翻译工具__translate: {},
@@ -98,38 +128,30 @@ describe('filterToolsForAgent', () => {
 			'bash',
 			'mcp__notes-search__find_notes',
 			'mcp__翻译工具__translate',
+			'memory',
 		])
 	})
 
-	it('exposes native vault and settings tools by agent role', () => {
-		const definitions = createAgentDefinitions({
-			fullAccess: false,
-			subagents: { explorer: { enabled: true }, memory: { enabled: true } },
-		})
-		expect(findDefinition(definitions, MASTER_AGENT_ID).tools).toEqual(
-			expect.arrayContaining([
-				'vault_list',
-				'vault_read',
-				'vault_grep',
-				'vault_links',
-				'vault_frontmatter',
-				'vault_batch_edit',
-				'view_pdf',
-				'settings_read',
-				'settings_patch',
-			]),
+	it('applies allow and deny to explorer, including bash denial', () => {
+		const tools = {
+			vault_list: {},
+			vault_read: {},
+			vault_batch_edit: {},
+			bash: {},
+			settings_patch: {},
+			memory: {},
+		} as unknown as ToolSet
+		const definition = findDefinition(
+			createAgentDefinitions({
+				fullAccess: false,
+				subagents: { explorer: { enabled: true } },
+			}),
+			EXPLORER_AGENT_ID,
 		)
-		const explorerTools = findDefinition(definitions, EXPLORER_AGENT_ID).tools
-		expect(explorerTools).toEqual(
-			expect.arrayContaining([
-				'vault_list',
-				'vault_read',
-				'vault_grep',
-				'vault_links',
-				'view_pdf',
-			]),
-		)
-		expect(explorerTools).not.toContain('vault_frontmatter')
-		expect(explorerTools).not.toContain('settings_patch')
+
+		const filtered = filterToolsForAgent(tools, definition)
+		expect(Object.keys(filtered)).toEqual(['vault_list', 'vault_read'])
+		expect(definition.tools).not.toContain('bash')
+		expect(definition.toolFilter?.deny).toContain('bash')
 	})
 })

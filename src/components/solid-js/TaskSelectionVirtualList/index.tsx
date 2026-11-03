@@ -1,4 +1,4 @@
-import { createMount, MountController } from '../mount'
+import { createMount, MountController } from '~/components/solid-js/mount'
 import TaskSelectionVirtualList, {
 	TaskSelectionItem,
 	TaskSelectionVirtualListProps,

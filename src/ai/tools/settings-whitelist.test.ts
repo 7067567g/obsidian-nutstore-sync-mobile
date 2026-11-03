@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { NutstoreSettings } from '~/settings'
 import {
 	applyNormalizedSettingsPatch,
 	parseSettingsWhitelistJson,
@@ -124,9 +125,7 @@ describe('settings whitelist tool timeout', () => {
 	})
 
 	it('applies and serializes the tool timeout without exposing secrets', () => {
-		const settings = settingsFixture() as never as {
-			ai: { toolTimeoutMs?: number }
-		}
+		const settings = settingsFixture() as unknown as NutstoreSettings
 		applyNormalizedSettingsPatch(settings, { toolTimeoutSeconds: 5 })
 		expect(settings.ai.toolTimeoutMs).toBe(5000)
 		const serialized = JSON.parse(serializeSettingsWhitelist(settings)) as {
@@ -136,9 +135,7 @@ describe('settings whitelist tool timeout', () => {
 	})
 
 	it('treats 0 as disabling the timeout', () => {
-		const settings = settingsFixture() as never as {
-			ai: { toolTimeoutMs?: number }
-		}
+		const settings = settingsFixture() as unknown as NutstoreSettings
 		settings.ai.toolTimeoutMs = 5000
 		applyNormalizedSettingsPatch(settings, { toolTimeoutSeconds: 0 })
 		expect(settings.ai.toolTimeoutMs).toBeUndefined()

@@ -18,7 +18,7 @@ import {
 	IntelligentMergeResult,
 	resolveByDiff3Merge,
 	resolveByIntelligentMerge,
-} from '../core/merge-utils'
+} from '~/sync/core/merge-utils'
 import { BaseTask, BaseTaskOptions, toTaskError } from './task.interface'
 
 export enum ConflictStrategy {

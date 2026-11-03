@@ -12,8 +12,8 @@ import {
 	aiProviderDefinitionsSchema,
 	AIProviderInput,
 	aiProviderInputsSchema,
-} from '../core/types'
-import modelsApiJson from '../models-api.json'
+} from '~/ai/core/types'
+import modelsApiJson from '~/ai/models-api.json'
 
 const DEFAULT_NPM_PACKAGE = '@ai-sdk/openai-compatible'
 
@@ -31,6 +31,22 @@ function formatSchemaIssues(error: z.core.$ZodError): string {
 			return `${path}: ${issue.message}`
 		})
 		.join('; ')
+}
+
+/**
+ * `cost` 含嵌套的 `context_over_200k`，必须整对象深拷贝；
+ * 否则创建出的模型配置会与来源对象（preset / 用户设置）共享同一引用，
+ * 任一方修改都会污染另一方。
+ */
+function cloneModelCost(cost: AIModelConfig['cost']): AIModelConfig['cost'] {
+	if (!cost) {
+		return undefined
+	}
+	const cloned: NonNullable<AIModelConfig['cost']> = { ...cost }
+	if (cost.context_over_200k) {
+		cloned.context_over_200k = { ...cost.context_over_200k }
+	}
+	return cloned
 }
 
 export function createModelConfig(
@@ -56,13 +72,42 @@ export function createModelConfig(
 			output: [...modalities.output],
 		},
 		open_weights: model.open_weights ?? false,
-		cost: model.cost,
+		cost: cloneModelCost(model.cost),
 		limit: { ...(model.limit || DEFAULT_LIMIT) },
-		interleaved: model.interleaved,
+		interleaved:
+			typeof model.interleaved === 'object'
+				? { ...model.interleaved }
+				: model.interleaved,
 		provider: model.provider ? { ...model.provider } : undefined,
 		status: model.status,
-		experimental: model.experimental,
+		experimental: model.experimental
+			? { ...model.experimental }
+			: model.experimental,
 	}
+}
+
+const UNSAFE_PROVIDER_HEADER_KEYS = new Set([
+	'__proto__',
+	'constructor',
+	'prototype',
+])
+
+/**
+ * Copies user-provided provider headers and drops empty/unsafe names.
+ * Values can hold credentials, so they are only stored in settings and are
+ * never written to logs, session records or diagnostics.
+ */
+function sanitizeProviderHeaders(
+	headers: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+	if (!headers) return undefined
+	const entries = Object.entries(headers)
+		.map(([key, value]) => [key.trim(), value] as const)
+		.filter(
+			([key]) =>
+				key.length > 0 && !UNSAFE_PROVIDER_HEADER_KEYS.has(key.toLowerCase()),
+		)
+	return entries.length > 0 ? Object.fromEntries(entries) : undefined
 }
 
 export function createProviderConfig(
@@ -79,6 +124,7 @@ export function createProviderConfig(
 		doc: provider.doc?.trim() || '',
 		apiKey: provider.apiKey || '',
 		allowBrowserCors: provider.allowBrowserCors ?? false,
+		headers: sanitizeProviderHeaders(provider.headers),
 		models: sanitizeModels(provider.models),
 	}
 }

@@ -1,8 +1,8 @@
 import type { ModelMessage } from 'ai'
 import { describe, expect, it, vi } from 'vitest'
-import { createProviderConfig } from '../catalog/config'
+import { createProviderConfig } from '~/ai/catalog/config'
 
-vi.mock('../providers/registry', () => ({
+vi.mock('~/ai/providers/registry', () => ({
 	getProviderResolver: () => ({
 		assertUsable: () => undefined,
 		createLanguageModel: () => undefined,

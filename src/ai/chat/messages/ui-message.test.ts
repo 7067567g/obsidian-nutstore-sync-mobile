@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
 	createEmptyMasterAgent,
+	finalizeAbortedToolCalls,
 	hasIncompleteToolCalls,
 	isTerminalToolPart,
 	modelMessageToUIMessage,
 	selectContextTimeline,
 	uiMessagesToModelMessages,
-} from '~/ai/chat/messages/ui-message'
+} from './ui-message'
 import type { AppUIMessage } from '~/ai/chat/types'
 import { BASH_TMP_MOUNT_POINT } from '~/ai/tools/bash/mount-points'
 
@@ -234,5 +235,88 @@ describe('tool boundary terminality', () => {
 		}
 		expect(isTerminalToolPart(agent.timeline[0].parts[0] as never)).toBe(true)
 		expect(hasIncompleteToolCalls(agent)).toBe(false)
+	})
+
+	it('finalizes an aborted tool call instead of deleting it', () => {
+		const agent = createEmptyMasterAgent(1)
+		agent.timeline.push({
+			id: 'tool-message',
+			role: 'assistant',
+			metadata: { createdAt: 1 },
+			parts: [
+				{
+					type: 'dynamic-tool',
+					toolName: 'bash',
+					toolCallId: 'call-1',
+					state: 'input-available',
+					input: { command: 'sleep 30' },
+				},
+			],
+		})
+		agent.toolTimings['call-1'] = { startedAt: 1 }
+		expect(finalizeAbortedToolCalls(agent)).toBe(true)
+		const part = agent.timeline[0].parts[0]
+		expect(isTerminalToolPart(part as never)).toBe(true)
+		expect(part).toMatchObject({
+			state: 'output-error',
+			errorText: expect.stringContaining('TOOL_ABORTED'),
+		})
+		expect(agent.toolTimings['call-1']).toMatchObject({
+			startedAt: 1,
+			outcome: 'aborted',
+		})
+		expect(hasIncompleteToolCalls(agent)).toBe(false)
+	})
+
+	it('marks a never-dispatched aborted tool call as not started', () => {
+		const agent = createEmptyMasterAgent(1)
+		agent.timeline.push({
+			id: 'tool-message',
+			role: 'assistant',
+			metadata: { createdAt: 1 },
+			parts: [
+				{
+					type: 'dynamic-tool',
+					toolName: 'apply_patch',
+					toolCallId: 'call-2',
+					state: 'input-available',
+					input: {},
+				},
+			],
+		})
+		expect(finalizeAbortedToolCalls(agent)).toBe(true)
+		expect(agent.timeline[0].parts[0]).toMatchObject({
+			state: 'output-error',
+			errorText: expect.stringContaining('TOOL_NOT_STARTED'),
+		})
+		expect(agent.toolTimings['call-2']?.outcome).toBe('aborted-before-dispatch')
+		expect(agent.toolTimings['call-2']?.startedAt).toBeUndefined()
+	})
+
+	it('marks a failed never-dispatched call without inventing a start time', () => {
+		const agent = createEmptyMasterAgent(1)
+		agent.timeline.push({
+			id: 'tool-message',
+			role: 'assistant',
+			metadata: { createdAt: 1 },
+			parts: [
+				{
+					type: 'dynamic-tool',
+					toolName: 'bash',
+					toolCallId: 'call-3',
+					state: 'input-available',
+					input: { command: 'sleep 30' },
+				},
+			],
+		})
+		expect(finalizeAbortedToolCalls(agent, 'unknown')).toBe(true)
+		expect(agent.timeline[0].parts[0]).toMatchObject({
+			state: 'output-error',
+			errorText: expect.stringContaining('TOOL_NOT_STARTED'),
+		})
+		expect(agent.toolTimings['call-3']).toMatchObject({
+			outcome: 'not-started',
+		})
+		expect(agent.toolTimings['call-3']?.startedAt).toBeUndefined()
 	})
 })

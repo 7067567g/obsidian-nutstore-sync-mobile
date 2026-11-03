@@ -1,4 +1,6 @@
-export const SESSION_LOG_FORMAT_VERSION = 1
+export const SESSION_LOG_FORMAT_VERSION = 2
+/** Segments kept after compaction: active plus this many previous generations. */
+export const SESSION_SEGMENT_RETENTION_GENERATIONS = 1
 export const SESSION_LOG_FILENAME = 'log.jsonl'
 export const SESSION_INDEX_FILENAME = 'index.json'
 export const SESSION_META_FILENAME = 'meta.json'
@@ -15,6 +17,8 @@ export interface SplitAgent {
 	path: string[]
 	id: string
 	meta: JsonRecord
+	/** Incremental per-call timing records; kept out of `meta` to avoid rewriting it. */
+	toolTimings: JsonRecord
 	messages: SplitMessage[]
 	operations: Map<string, unknown[]>
 }
@@ -25,6 +29,14 @@ export function isJsonRecord(value: unknown): value is JsonRecord {
 
 export function agentPathKey(path: readonly string[]) {
 	return path.join('/')
+}
+
+export function stateKey(pathKey: string, messageId: string) {
+	return `${pathKey}\u0000${messageId}`
+}
+
+export function prefixKey(pathKey: string) {
+	return `${pathKey}\u0000`
 }
 
 export function sessionWithoutSubagents(snapshot: JsonRecord): JsonRecord {
@@ -38,7 +50,17 @@ function stripAgentMeta(agent: JsonRecord): JsonRecord {
 	delete meta.timeline
 	delete meta.operations
 	delete meta.subagents
+	delete meta.toolTimings
 	return meta
+}
+
+function splitToolTimings(agent: JsonRecord): JsonRecord {
+	const timings: JsonRecord = {}
+	if (!isJsonRecord(agent.toolTimings)) return timings
+	for (const [toolCallId, timing] of Object.entries(agent.toolTimings)) {
+		if (isJsonRecord(timing)) timings[toolCallId] = timing
+	}
+	return timings
 }
 
 function messageId(message: JsonRecord, index: number) {
@@ -65,6 +87,7 @@ export function splitSessionSnapshot(snapshot: JsonRecord): SplitAgent[] {
 			path,
 			id: typeof agent.id === 'string' ? agent.id : id,
 			meta: stripAgentMeta(agent),
+			toolTimings: splitToolTimings(agent),
 			messages: timeline
 				.map((message, index) =>
 					isJsonRecord(message)

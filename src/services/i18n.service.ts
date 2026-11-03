@@ -1,7 +1,7 @@
 import i18n from '~/i18n'
 import { BaseService } from './service.interface'
 import logger from '~/utils/logger'
-import NutstorePlugin from '..'
+import NutstorePlugin from '~/index'
 
 export default class I18nService extends BaseService {
 	constructor(private plugin: NutstorePlugin) {

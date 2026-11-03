@@ -7,7 +7,7 @@ import {
 	type FileDiffSegment,
 } from '~/ai/chat/messages/file-diff'
 import type { ReversibleFileSnapshot, ReversibleToolOp } from '~/ai/chat/types'
-import { t } from '../../i18n'
+import { t } from '~/components/solid-js/i18n'
 import { CollapsibleBlock } from './CollapsibleBlock'
 
 function hasMissingSnapshot(change: ReversibleToolOp): boolean {

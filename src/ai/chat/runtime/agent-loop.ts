@@ -1,10 +1,10 @@
 import type { ToolCallRepeatState } from '~/ai/core/tool-call-repeat'
-import type { AgentTurnResult } from '~/ai/chat/runtime/agent-runner'
+import type { AgentTurnResult } from './agent-runner'
 import type {
 	ContextCompactionCoordinator,
 	ContextCompactionProgress,
 	ContextCompactionRequest,
-} from '~/ai/chat/runtime/context-compaction-coordinator'
+} from './context-compaction-coordinator'
 
 interface AgentLoopStateBase {
 	continuation?: ToolCallRepeatState

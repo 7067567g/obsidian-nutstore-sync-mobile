@@ -6,11 +6,12 @@ import type {
 } from 'ai'
 import type { ChatSession } from '~/ai/chat/domain'
 import { extractErrorMessage } from '~/ai/chat/error-utils'
+import { isPermissionDeniedError } from '~/ai/chat/tool-outcome'
 import type { MessageFactory } from '~/ai/chat/messages/message-factory'
 import { normalizeReversibleToolOpRecord } from '~/ai/chat/messages/reversible-op-utils'
 import { isTerminalToolPart } from '~/ai/chat/messages/ui-message'
-import type { SessionRuntimeState } from '~/ai/chat/runtime/chat-state'
-import type { ToolOutputRetainer } from '~/ai/chat/runtime/tool-output-retention'
+import type { SessionRuntimeState } from './chat-state'
+import type { ToolOutputRetainer } from './tool-output-retention'
 import type { SessionStore } from '~/ai/chat/session/session-store'
 import type {
 	AppUIMessage,
@@ -46,6 +47,12 @@ export type AgentProjectionEvent =
 			>
 			metadata: ReadonlyMap<string, AppToolMetadata>
 	  }
+
+function toolErrorOutcome(error: unknown) {
+	// AUD-02: user denial and execution failure both surface as tool errors.
+	// Tag denial explicitly so the persisted toolTimings stay machine-readable.
+	return isPermissionDeniedError(error) ? 'denied' : 'error'
+}
 
 interface AgentEventProjectorOptions {
 	session: ChatSession
@@ -128,7 +135,9 @@ export class AgentEventProjector {
 					startedAt,
 					finishedAt: startedAt + event.durationMs,
 					outcome:
-						event.toolOutput.type === 'tool-error' ? 'error' : 'completed',
+						event.toolOutput.type === 'tool-error'
+							? toolErrorOutcome(event.toolOutput.error)
+							: 'completed',
 				}
 				const message = this.assistantMessage
 				const partIndex =
@@ -232,7 +241,7 @@ export class AgentEventProjector {
 						type: 'dynamic-tool' as const,
 						toolName: outcome.toolName,
 						toolCallId: outcome.toolCallId,
-						input: outcome.input,
+						input: outcome.input as unknown,
 						...(outcome.providerExecuted === true
 							? { providerExecuted: true }
 							: {}),

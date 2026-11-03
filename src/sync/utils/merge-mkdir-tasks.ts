@@ -1,5 +1,5 @@
-import MkdirRemoteTask from '../tasks/mkdir-remote.task'
-import MkdirsRemoteTask from '../tasks/mkdirs-remote.task'
+import MkdirRemoteTask from '~/sync/tasks/mkdir-remote.task'
+import MkdirsRemoteTask from '~/sync/tasks/mkdirs-remote.task'
 
 /**
  * Merge mkdir tasks that have parent-child relationships into MkdirsRemoteTask.

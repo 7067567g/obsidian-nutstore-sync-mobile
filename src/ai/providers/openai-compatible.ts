@@ -26,9 +26,9 @@ function assertOpenAICompatibleProviderUsable(provider: AIProviderConfig) {
 
 export const openAICompatibleProviderResolver: AIProviderResolver = {
 	assertUsable: assertOpenAICompatibleProviderUsable,
-	createLanguageModel(provider, modelId) {
+	createLanguageModel(provider, modelId, context) {
 		assertOpenAICompatibleProviderUsable(provider)
-		const settings = createProviderSettings(provider)
+		const settings = createProviderSettings(provider, context)
 		const factory = createOpenAICompatible({
 			...settings,
 			baseURL: getBaseURL(provider)!,

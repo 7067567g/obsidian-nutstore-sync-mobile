@@ -136,7 +136,7 @@ export async function executeVaultFrontmatter(
 				parsedFields = {}
 			} else {
 				try {
-					const parsed = parseYaml(match[1])
+					const parsed: unknown = parseYaml(match[1])
 					if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
 						parsedFields = stripPosition(parsed as Record<string, unknown>)
 					}

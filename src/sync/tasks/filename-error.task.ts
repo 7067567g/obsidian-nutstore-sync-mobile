@@ -1,4 +1,4 @@
-import { getInvalidChars } from '../../utils/has-invalid-char'
+import { getInvalidChars } from '~/utils/has-invalid-char'
 import { BaseTask, toTaskError } from './task.interface'
 
 import i18n from '~/i18n'

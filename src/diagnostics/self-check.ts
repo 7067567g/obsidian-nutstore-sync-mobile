@@ -1,5 +1,15 @@
 import { apiVersion, Platform, requestUrl } from 'obsidian'
-import type NutstorePlugin from '..'
+import type NutstorePlugin from '~/index'
+import { NUTSTORE_LLM_GATEWAY_PROVIDER_ID } from '~/consts'
+import {
+	buildConnectivityReport,
+	type ConnectivityReport,
+	type DegradationDetail,
+	type GatewayCapability,
+	type McpHealth,
+	type McpRuntimeLike,
+	type SsoCapability,
+} from './degradation'
 import { DIAGNOSTICS_ROOT_DIR } from './log-file'
 
 export interface DiagnosticsSelfCheckReport {
@@ -47,6 +57,11 @@ export interface DiagnosticsSelfCheckReport {
 		structuredClone: string
 		requestIdleCallback: string
 	}
+	/** #104: observed gateway / SSO / MCP capability and degradation state. */
+	gateway: GatewayCapability
+	sso: SsoCapability
+	mcp: McpHealth
+	degradation: DegradationDetail[]
 }
 
 function safeStringifyType(value: unknown) {
@@ -91,6 +106,51 @@ function getCapability(name: string) {
 	return readType((window as unknown as Record<string, unknown>)[name])
 }
 
+/**
+ * Read the already-observed gateway/SSO/MCP state. Deliberately does not probe
+ * the network and never copies tokens or OAuth ciphertext into the report.
+ */
+function readConnectivity(plugin: NutstorePlugin): ConnectivityReport {
+	const settings = plugin.settings
+	const ai = toRecord(settings?.ai)
+	const gatewaySettings = toRecord(ai.nutstoreLlmGateway)
+	const providers = toRecord(ai.providers)
+	const provider = toRecord(providers[NUTSTORE_LLM_GATEWAY_PROVIDER_ID])
+	const models = toRecord(provider.models)
+	let lastFailure: GatewayCapability['lastFailure']
+	try {
+		lastFailure = plugin.nutstoreLlmGatewayService?.getLastGatewayFailure?.()
+	} catch {
+		lastFailure = undefined
+	}
+	let mcpRuntimes: McpRuntimeLike[]
+	try {
+		const runtimes = plugin.mcpService?.getServerRuntimes?.()
+		mcpRuntimes = Array.isArray(runtimes) ? runtimes : []
+	} catch {
+		mcpRuntimes = []
+	}
+	return buildConnectivityReport({
+		loginMode: settings?.loginMode,
+		hasOAuthResponse:
+			typeof settings?.oauthResponseText === 'string' &&
+			settings.oauthResponseText.trim().length > 0,
+		canDecrypt: typeof plugin.getDecryptedOAuthInfo === 'function',
+		gateway: {
+			authorized:
+				typeof gatewaySettings.accessToken === 'string' &&
+				gatewaySettings.accessToken.length > 0 &&
+				typeof gatewaySettings.refreshToken === 'string' &&
+				gatewaySettings.refreshToken.length > 0,
+			authorizing: !!gatewaySettings.pendingAuthorization,
+			providerConfigured: Object.keys(provider).length > 0,
+			modelCount: Object.keys(models).length,
+			lastFailure,
+		},
+		mcpRuntimes,
+	})
+}
+
 export async function runSelfCheck(
 	plugin: NutstorePlugin,
 ): Promise<DiagnosticsSelfCheckReport> {
@@ -99,6 +159,7 @@ export async function runSelfCheck(
 	const navigatorLike = getNavigator()
 	const windowLike = getWindow()
 	const navigatorRecord = toRecord(navigatorLike)
+	const connectivity = readConnectivity(plugin)
 
 	const report: DiagnosticsSelfCheckReport = {
 		generatedAt: new Date().toISOString(),
@@ -168,6 +229,7 @@ export async function runSelfCheck(
 					(windowLike as { requestIdleCallback?: unknown }).requestIdleCallback,
 			),
 		},
+		...connectivity,
 	}
 
 	try {

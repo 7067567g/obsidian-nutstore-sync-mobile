@@ -118,7 +118,10 @@ export async function getDirectoryContents(
 			if (!nextLink) {
 				break
 			}
-			const nextUrl = new URL(nextLink)
+			// A `rel="next"` Link value may be a relative reference (legal per
+			// RFC 8288); resolve it against the current request URL instead of
+			// `new URL(nextLink)`, which throws `TypeError: Invalid URL`.
+			const nextUrl = new URL(nextLink, currentUrl)
 			nextUrl.pathname = decodeURI(nextUrl.pathname)
 			currentUrl = nextUrl.toString()
 		} catch (e) {

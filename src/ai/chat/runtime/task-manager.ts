@@ -1,5 +1,3 @@
-import type { App } from 'obsidian'
-
 import {
 	findAgent,
 	findParentAgent,
@@ -13,69 +11,23 @@ import {
 	isTerminalAgent,
 } from '~/ai/chat/domain'
 import { extractErrorMessage } from '~/ai/chat/error-utils'
-import {
-	ContextCompactionCoordinator,
-	createContextCompactionRevision,
-	type ContextCompactionRequest,
-} from '~/ai/chat/runtime/context-compaction-coordinator'
-import { AgentRunner } from '~/ai/chat/runtime/agent-runner'
-import { runAgentLoop, type AgentLoopError } from '~/ai/chat/runtime/agent-loop'
+import { runAgentLoop } from './agent-loop'
 import { MAX_CONCURRENT_TASKS_PER_SESSION } from '~/ai/chat/prompts'
-import type { ChatState } from '~/ai/chat/runtime/chat-state'
-import type { Selection } from '~/ai/chat/runtime/selection'
-import type { ToolExecutor } from '~/ai/chat/runtime/tool-executor'
-import type { SessionStore } from '~/ai/chat/session/session-store'
-import type { AppUIMessage, ChatAgentState } from '~/ai/chat/types'
-import type { AIModelConfig, AIProviderConfig } from '~/ai/core/types'
+import { TaskManagerBase } from './task-manager-base'
+import type { ChatAgentState } from '~/ai/chat/types'
 import { BASH_TMP_MOUNT_POINT } from '~/ai/tools/bash/mount-points'
 import { writeBashTmpText } from '~/ai/tools/bash/tmp-fs'
 import {
 	assertMasterPendingInputsEmpty,
 	consumePendingInputs,
 } from '~/ai/chat/messages/ui-message'
-import type { TaskOrigin } from '~/ai/chat/runtime/master-turn-scheduler'
+import type { TaskOrigin } from './master-turn-scheduler'
 import i18n from '~/i18n'
-import createId, { createUniqueWordId } from '~/utils/create-id'
+import createId from '~/utils/create-id'
 import type { DispatchTaskParams, DispatchTaskResult } from '~/ai/tools/task'
 import { createAbortError } from '~/ai/transport/abort'
 
-export class TaskManager {
-	private enqueueMasterAgentInput: (
-		sessionId: string,
-		input: AppUIMessage,
-		origin: TaskOrigin,
-	) => boolean = () => false
-	private taskOrigins = new Map<string, TaskOrigin>()
-
-	constructor(
-		private app: App,
-		private ensureProviderReady: (provider: AIProviderConfig) => Promise<void>,
-		private state: ChatState,
-		private selection: Selection,
-		private store: SessionStore,
-		private notify: () => void,
-		private toolExecutor: ToolExecutor,
-		private messageFactory: import('~/ai/chat/messages/message-factory').MessageFactory,
-		private agentRunner: AgentRunner,
-		compactionCoordinator?: ContextCompactionCoordinator,
-	) {
-		this.compactionCoordinator =
-			compactionCoordinator ??
-			new ContextCompactionCoordinator(this.store, this.messageFactory)
-	}
-
-	private readonly compactionCoordinator: ContextCompactionCoordinator
-
-	setMasterAgentInputHandler(
-		handler: (
-			sessionId: string,
-			input: AppUIMessage,
-			origin: TaskOrigin,
-		) => boolean,
-	) {
-		this.enqueueMasterAgentInput = handler
-	}
-
+export class TaskManager extends TaskManagerBase {
 	async runAgent(
 		session: ChatSession,
 		agent: ChatAgentState,
@@ -176,50 +128,6 @@ export class TaskManager {
 		}
 	}
 
-	private agentLoopErrorMessage(error: AgentLoopError) {
-		if (error.type !== 'turn-failed') {
-			return i18n.t('chatbox.errors.contextCompressionFailed')
-		}
-		return extractErrorMessage(error.cause, i18n.t('chatbox.requestFailed'))
-	}
-
-	private createCompactionRequest(
-		session: ChatSession,
-		agent: ChatAgentState,
-		provider: AIProviderConfig,
-		model: AIModelConfig,
-		isTurnAlive: () => boolean,
-	): ContextCompactionRequest {
-		const selectedModel = agent.model
-		// Capture primitive ids at request creation. The selection object can be
-		// mutated in place when settings change; retaining the object reference
-		// would make the stale-job check observe the new values as if they were
-		// the original configuration.
-		const selectedProviderId = selectedModel?.providerId
-		const selectedModelId = selectedModel?.modelId
-		const revision = createContextCompactionRevision(session, provider, model)
-		return {
-			session,
-			agent,
-			provider,
-			model,
-			revision,
-			ensureProviderReady: () => this.ensureProviderReady(provider),
-			resolveSummaryContext: () =>
-				this.agentRunner.resolveSummaryContext(agent, session, model),
-			isCancelled: () => !isTurnAlive(),
-			isCurrent: () => {
-				const currentSelection = agent.model
-				return (
-					isTurnAlive() &&
-					currentSelection?.providerId === selectedProviderId &&
-					currentSelection?.modelId === selectedModelId &&
-					createContextCompactionRevision(session, provider, model) === revision
-				)
-			},
-		}
-	}
-
 	async dispatchTask(
 		params: DispatchTaskParams,
 		origin: TaskOrigin,
@@ -291,63 +199,6 @@ export class TaskManager {
 			subagentType: definition.id,
 			status: 'dispatched',
 		}
-	}
-
-	private async createAgentId(session: ChatSession, agentType: string) {
-		return createUniqueWordId(agentType, (id) =>
-			Boolean(findAgent(getMasterAgent(session), id)),
-		)
-	}
-
-	private resolveSubagentModelSelection(
-		configuredModel: ChatSession['model'],
-		fallbackModel: ChatSession['model'],
-	) {
-		if (!configuredModel) {
-			return fallbackModel ? { ...fallbackModel } : undefined
-		}
-		try {
-			const provider = this.selection.getProviderByIdOrThrow(
-				configuredModel.providerId,
-			)
-			this.selection.getModelByIdsOrThrow(provider, configuredModel.modelId)
-			return { ...configuredModel }
-		} catch {
-			return fallbackModel ? { ...fallbackModel } : undefined
-		}
-	}
-
-	private originKey(sessionId: string, agentId: string) {
-		return `${sessionId}:${agentId}`
-	}
-
-	private isCurrentSession(session: ChatSession) {
-		return (
-			this.state.loadedSessions.get(session.id) === session &&
-			!this.state.deletedSessionIds.has(session.id)
-		)
-	}
-
-	private isOriginAlive(origin: TaskOrigin) {
-		return !origin.signal.aborted
-	}
-
-	private isAgentExecutionAlive(
-		session: ChatSession,
-		agent: ChatAgentState,
-		origin: TaskOrigin,
-	) {
-		return (
-			this.isCurrentSession(session) &&
-			this.isOriginAlive(origin) &&
-			!isTerminalAgent(agent)
-		)
-	}
-
-	private persistCurrentSession(session: ChatSession) {
-		return this.store.persistSession(session, () =>
-			this.isCurrentSession(session),
-		)
 	}
 
 	private async stageParentContinuation(
@@ -424,43 +275,6 @@ export class TaskManager {
 		}
 	}
 
-	private createTaskResultInput(
-		taskId: string,
-		resultPath: string,
-	): AppUIMessage {
-		return {
-			id: createId('input'),
-			role: 'user',
-			metadata: { createdAt: Date.now() },
-			parts: [
-				{
-					type: 'data-system-notification',
-					data: {
-						kind: 'task-result-ready',
-						taskId,
-						resultPath,
-					},
-				},
-			],
-		}
-	}
-
-	private hasTaskResultNotification(agent: ChatAgentState, taskId: string) {
-		return agent.timeline.some((message: AppUIMessage) =>
-			message.parts.some(
-				(part) =>
-					part.type === 'data-system-notification' &&
-					part.data.kind === 'task-result-ready' &&
-					part.data.taskId === taskId,
-			),
-		)
-	}
-
-	private removePendingInput(agent: ChatAgentState, input: AppUIMessage) {
-		const inputIndex = agent.pendingInputs.indexOf(input)
-		if (inputIndex !== -1) agent.pendingInputs.splice(inputIndex, 1)
-	}
-
 	private finalizeAgentSettlement(session: ChatSession, agent: ChatAgentState) {
 		this.compactionCoordinator.cancel(session.id, agent.id)
 		this.cleanupAgentTracking(session.id, agent.id)
@@ -487,12 +301,6 @@ export class TaskManager {
 		agent.startedAt ??= Date.now()
 		void this.persistCurrentSession(session)
 		void this.runAgent(session, agent, origin)
-	}
-
-	private hasActiveChildAgents(agent: ChatAgentState) {
-		return Object.values(agent.subagents).some(
-			(child) => !isTerminalAgent(child),
-		)
 	}
 
 	async finishAgentAsCompleted(
@@ -623,9 +431,5 @@ export class TaskManager {
 			this.compactionCoordinator.cancel(session.id, agentId)
 			this.taskOrigins.delete(key)
 		}
-	}
-
-	private cleanupAgentTracking(sessionId: string, agentId: string) {
-		this.taskOrigins.delete(this.originKey(sessionId, agentId))
 	}
 }

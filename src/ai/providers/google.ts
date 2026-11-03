@@ -8,9 +8,9 @@ import type { AIProviderResolver } from './types'
 
 export const googleProviderResolver: AIProviderResolver = {
 	assertUsable: assertProviderApiKeyUsable,
-	createLanguageModel(provider, modelId) {
+	createLanguageModel(provider, modelId, context) {
 		assertProviderApiKeyUsable(provider)
-		const factory = createGoogle(createProviderSettings(provider))
+		const factory = createGoogle(createProviderSettings(provider, context))
 		return createResolvedLanguageModel(provider, factory(modelId))
 	},
 }

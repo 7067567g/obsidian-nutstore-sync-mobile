@@ -1,8 +1,8 @@
 import { Menu } from 'obsidian'
 import { Show } from 'solid-js'
 import type { ChatboxProps } from '~/ai/chat/ui/types'
-import { t } from '../../i18n'
-import { formatTime } from '../utils'
+import { t } from '~/components/solid-js/i18n'
+import { formatTime } from '~/components/solid-js/Chatbox/utils'
 
 export function SessionHistoryItem(props: {
 	session: ChatboxProps['sessionHistory'][number]

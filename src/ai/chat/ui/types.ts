@@ -7,7 +7,7 @@ import type {
 } from '~/ai/chat/types'
 import type { LanguageModelUsage } from 'ai'
 import type { UserContextItem } from '~/ai/chat/context/user-context'
-import type { ChatModalMountTarget } from '~/ai/chat/ui/modal-mount'
+import type { ChatModalMountTarget } from './modal-mount'
 
 interface ChatModelOption {
 	id: string
@@ -36,6 +36,8 @@ export interface ChatMcpServerOption {
 }
 
 export interface ChatTimelineMessageItem {
+	/** Stable identity for keyed store reconciliation; mirrors `message.id`. */
+	id: string
 	createdAt: number
 	message: AppUIMessage
 	displayBlocks: ChatDisplayBlock[]
@@ -52,6 +54,11 @@ export interface ChatAgentView {
 	timeline: ChatTimelineMessageItem[]
 }
 
+export interface QueuedChatSubmission extends ChatSubmission {
+	/** Runtime-only identity until the turn is claimed. */
+	id: string
+}
+
 interface ChatboxViewModel {
 	loading: boolean
 	title: string
@@ -66,7 +73,7 @@ interface ChatboxViewModel {
 	selectedModelId?: string
 	runState: ChatRunState
 	draft: ChatSubmission
-	pending: ChatSubmission[]
+	pending: QueuedChatSubmission[]
 	canSend: boolean
 	canCompress: boolean
 	/** Globally enabled MCP servers with per-session state, for the session MCP popover. */
@@ -79,7 +86,7 @@ interface ChatboxViewModel {
 	usage?: LanguageModelUsage
 	/** Total context window (tokens) of the active model, or undefined when no model is selected. */
 	contextWindow?: number
-	/** Use browser-native content-visibility windowing for long timelines. */
+	/** Mount only the paged tail window for long timelines (PERF-01). */
 	windowedRendering?: boolean
 }
 
@@ -102,14 +109,17 @@ export interface ChatboxProps extends ChatboxViewModel {
 	onSendMessage: (
 		text: string,
 		activeContextItems?: UserContextItem[],
+		sessionId?: string,
 	) => Promise<boolean>
-	onUpdateInputDraft: (text: string) => void
+	onUpdateInputDraft: (text: string, sessionId?: string) => void
 	onStopActiveRun?: () => void
-	onAddUserContext: (item: UserContextItem) => void
-	onRemoveUserContext: (index: number) => void
+	onCancelPendingSubmission?: (id: string) => boolean | Promise<boolean>
+	onAddUserContext: (item: UserContextItem, sessionId?: string) => void
+	onRemoveUserContext: (index: number, sessionId?: string) => void
 	onResolvePendingContextItem: (
 		id: string,
 		replacement: UserContextItem | null,
+		sessionId?: string,
 	) => void
 	onDropContextItem: (path: string) => Promise<void> | void
 	onCaptureActiveContext?: () => void
@@ -118,7 +128,7 @@ export interface ChatboxProps extends ChatboxViewModel {
 	onRegenerateMessage?: (messageId: string) => void
 	onRecallMessage?: (
 		messageId: string,
-		options?: { restoreFiles?: boolean },
+		options?: { restoreFiles?: boolean; sessionId?: string },
 	) => Promise<RecallMessageResult | void> | void
 	onRecallHasReversibleOps?: (messageId: string) => boolean
 	onToggleSessionMcpServer?: (serverName: string) => void

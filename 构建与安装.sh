@@ -20,9 +20,9 @@ export NS_NSDAV_ENDPOINT="${NS_NSDAV_ENDPOINT:-https://dav.jianguoyun.com/nsdav}
 export NS_DAV_ENDPOINT="${NS_DAV_ENDPOINT:-https://dav.jianguoyun.com/dav}"
 export LLM_GATEWAY_CLIENT_ID="${LLM_GATEWAY_CLIENT_ID:-dc_obsidian_dp0gymrn}"
 
-ADB="${ADB:-/mnt/c/Users/Administrator/Desktop/Deepseek_python/归档/旧源-20260904/03_库与工具环境/platform-tools/adb.exe}"
-DEVICE="${DEVICE:-ZXQOKRQ8GMQ4UGRW}"
-VAULT="${VAULT:-/sdcard/Documents/Obsidian-期以岁月/期以岁月}"
+ADB="${ADB:-adb}"
+DEVICE="${DEVICE:-}"
+VAULT="${VAULT:-/sdcard/Documents/Obsidian/MyVault}"
 PLUGIN="${PLUGIN:-$VAULT/.obsidian/plugins/nutstore-sync}"
 BACKUP_ROOT="${BACKUP_ROOT:-$HOME/.cache/nutstore-sync-install-backups}"
 
@@ -30,6 +30,7 @@ log() { printf '[构建与安装] %s\n' "$*"; }
 die() { printf '[构建与安装] 错误：%s\n' "$*" >&2; exit 1; }
 
 need_adb() {
+	[ -n "$DEVICE" ] || die "请用 DEVICE 环境变量指定 Android 设备序列号"
 [ -x "$ADB" ] || die "ADB 不可执行：$ADB（可用 ADB 环境变量覆盖）"
 "$ADB" -s "$DEVICE" get-state >/dev/null 2>&1 || die "设备未连接/未授权：$DEVICE"
 }
@@ -122,7 +123,7 @@ if [ -z "$target" ]; then
 target="$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -n 1 || true)"
 fi
 [ -n "$target" ] || die "没有可用回滚目录（$BACKUP_ROOT）"
-[ -s "$target/plugin/main.js" ] || target="$target/plugin"
+if [ -s "$target/plugin/main.js" ]; then target="$target/plugin"; fi
 [ -s "$target/main.js" ] || die "回滚目录缺少 main.js：$target"
 log "回滚插件到 $target"
 (

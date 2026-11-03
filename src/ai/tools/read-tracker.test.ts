@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createFragmentReadTracker } from '~/ai/tools/file-operation'
+import { createFragmentReadTracker } from './file-operation'
 import { type ChatFragment } from '~/ai/chat/domain'
 
 describe('createFragmentReadTracker', () => {

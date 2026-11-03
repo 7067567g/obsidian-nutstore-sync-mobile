@@ -2,15 +2,19 @@ import { Bash } from 'just-bash/browser'
 import { runWithTimeout } from '~/ai/chat/runtime/tool-timeout'
 import type { App } from 'obsidian'
 import type { PermissionGuard } from '~/ai/tools/permission-guard'
-import { ReversibleOpRecorder } from './fs'
+import { ReversibleOpRecorder, type UnguardedWriteReason } from './fs'
+import { createSearchCommands } from './search'
 import { archiveCommands } from './zip'
 import {
 	createVaultFileSystem,
 	VAULT_MOUNT_POINT,
 	type VaultFileSystemManager,
-} from '../vault-filesystem'
+} from '~/ai/tools/vault-filesystem'
 import { BashResourceBudget, createBashResourceBudget } from './fs'
-import type { SettingsSnapshotFn, SettingsUpdater } from '../tool-context'
+import type {
+	SettingsSnapshotFn,
+	SettingsUpdater,
+} from '~/ai/tools/tool-context'
 
 export interface VaultBashExecOptions {
 	cwd?: string
@@ -26,6 +30,8 @@ export interface VaultBashExecOptions {
 	getSettingsSnapshot?: SettingsSnapshotFn
 	updateSettings?: SettingsUpdater
 	fileSystemManager?: VaultFileSystemManager
+	/** D-005: explicit reason required for unguarded writes (e.g. test harness). */
+	unguardedWrite?: UnguardedWriteReason
 }
 
 /**
@@ -62,6 +68,8 @@ export async function createVaultBash(
 	},
 	fileSystemManager?: VaultFileSystemManager,
 	resourceBudget?: BashResourceBudget,
+	unguardedWrite?: UnguardedWriteReason,
+	abortSignal?: AbortSignal,
 ) {
 	const fs = await createVaultFileSystem(app, {
 		permissionGuard,
@@ -71,11 +79,13 @@ export async function createVaultBash(
 		updateSettings: settingsIo?.updateSettings,
 		fileSystemManager,
 		resourceBudget,
+		unguardedWrite,
+		abortSignal,
 	})
 	return new Bash({
 		fs,
 		cwd: VAULT_MOUNT_POINT,
-		customCommands: archiveCommands,
+		customCommands: [...archiveCommands, ...createSearchCommands(abortSignal)],
 		executionLimits: VAULT_BASH_EXECUTION_LIMITS,
 	})
 }
@@ -86,26 +96,29 @@ export async function execVaultBash(
 	options: VaultBashExecOptions = {},
 ) {
 	const recorder = new ReversibleOpRecorder()
-	const bash = await createVaultBash(
-		app,
-		options.permissionGuard,
-		recorder,
-		options.onRead,
-		{
-			getSettingsSnapshot: options.getSettingsSnapshot,
-			updateSettings: options.updateSettings,
-		},
-		options.fileSystemManager,
-		options.resourceBudget ?? createBashResourceBudget(),
-	)
 	const result = await runWithTimeout(
-		(signal) =>
-			bash.exec(script, {
+		async (signal) => {
+			const bash = await createVaultBash(
+				app,
+				options.permissionGuard,
+				recorder,
+				options.onRead,
+				{
+					getSettingsSnapshot: options.getSettingsSnapshot,
+					updateSettings: options.updateSettings,
+				},
+				options.fileSystemManager,
+				options.resourceBudget ?? createBashResourceBudget(),
+				options.unguardedWrite,
+				signal,
+			)
+			return bash.exec(script, {
 				cwd: options.cwd ?? VAULT_MOUNT_POINT,
 				stdin: options.stdin,
 				rawScript: options.rawScript,
 				signal,
-			}),
+			})
+		},
 		{
 			toolName: 'bash',
 			timeoutMs: options.timeoutMs,
@@ -125,4 +138,4 @@ export {
 	BUILTIN_SKILLS_MOUNT_POINT,
 	SETTINGS_MOUNT_POINT,
 	VAULT_MOUNT_POINT,
-} from '../vault-filesystem'
+} from '~/ai/tools/vault-filesystem'

@@ -1,12 +1,13 @@
 import { MountableFs, type IFileSystem } from 'just-bash/browser'
 import { normalizePath, type App } from 'obsidian'
 import { createBuiltinSkillsFs } from '~/ai/skills/builtin'
-import { listAvailableAdapterEntries } from '~/ai/tools/available-adapter-entries'
-import type { PermissionGuard } from '~/ai/tools/permission-guard'
+import { listAvailableAdapterEntries } from './available-adapter-entries'
+import type { PermissionGuard } from './permission-guard'
 import {
 	ObsidianVaultFs,
 	ReversibleOpRecorder,
 	type BashResourceBudget,
+	type UnguardedWriteReason,
 } from './bash/fs'
 import {
 	AGENTS_MOUNT_POINT,
@@ -21,12 +22,19 @@ import type { SettingsSnapshotFn, SettingsUpdater } from './tool-context'
 
 export interface CreateVaultFileSystemOptions {
 	permissionGuard?: PermissionGuard
+	/**
+	 * D-005: explicit reason required to write without a permission guard.
+	 * Omit it for guarded tool calls; unguarded writes fail closed (EPERM).
+	 */
+	unguardedWrite?: UnguardedWriteReason
 	recorder?: ReversibleOpRecorder
 	onRead?: (vaultPath: string) => void
 	getSettingsSnapshot?: SettingsSnapshotFn
 	updateSettings?: SettingsUpdater
 	fileSystemManager?: VaultFileSystemManager
 	resourceBudget?: BashResourceBudget
+	/** Abort/deadline propagated from runWithTimeout; checked by the FS adapter. */
+	abortSignal?: AbortSignal
 }
 
 interface SharedVaultFileSystem {
@@ -111,6 +119,8 @@ async function createScopedVaultFileSystem(
 		options.permissionGuard,
 		onRead,
 		options.resourceBudget,
+		options.unguardedWrite,
+		options.abortSignal,
 	)
 	const settingsFs =
 		options.getSettingsSnapshot && options.updateSettings
@@ -118,6 +128,7 @@ async function createScopedVaultFileSystem(
 					getSettings: options.getSettingsSnapshot,
 					updateSettings: options.updateSettings,
 					permissionGuard: options.permissionGuard,
+					unguardedWrite: options.unguardedWrite,
 					onRead,
 				})
 			: undefined

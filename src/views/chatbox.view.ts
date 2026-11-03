@@ -1,10 +1,7 @@
 import {
-	Component,
 	ItemView,
 	MarkdownView,
-	MarkdownRenderer,
 	normalizePath,
-	type TAbstractFile,
 	TFile,
 	TFolder,
 	WorkspaceLeaf,
@@ -13,7 +10,6 @@ import type { EditorView } from '@codemirror/view'
 import { CHATBOX_AI_ICON_ID } from '~/assets/icons/obsidian-nutstore-ai-icon'
 import { resolveResourceDataUrl } from '~/ai/tools/resource-data-url'
 import {
-	createImageContextItem,
 	createPendingContextItem,
 	createSelectedTextContextItem,
 	createVaultPathContextItem,
@@ -24,41 +20,21 @@ import {
 import type { ChatboxController, ChatboxProps } from '~/ai/chat/ui/types'
 import i18n from '~/i18n'
 import logger from '~/utils/logger'
-import type NutstorePlugin from '..'
+import type NutstorePlugin from '~/index'
 import {
 	hideChatboxSelectionHighlight,
 	showChatboxSelectionHighlight,
 } from './chatbox-selection-highlight'
-import { enhanceHtmlCodeBlocks } from './chatbox-code-preview'
 import {
-	resolveMarkdownLinkAction,
-	resolveMarkdownSourcePath,
-} from './markdown-link-handler'
-import { mountChatbox } from '../components/solid-js'
+	createDroppedImageContextItem,
+	isVaultImageFile,
+	resolveDroppedAbstractFile,
+} from './chatbox-view-drop'
+import { renderChatMarkdown } from './chatbox-view-render'
+import { resolveMarkdownSourcePath } from './markdown-link-handler'
+import { mountChatbox } from '~/components/solid-js'
 
 export const CHATBOX_VIEW_TYPE = 'nutstore-sync-chatbox'
-
-function normalizeDroppedVaultPath(path: string): string | null {
-	let value = path.trim()
-	if (!value) return null
-	if (value.startsWith('obsidian://open?')) {
-		try {
-			const url = new URL(value)
-			value = url.searchParams.get('file') ?? value
-		} catch {
-			// Keep the raw value as a fallback candidate.
-		}
-	}
-	try {
-		value = decodeURIComponent(value)
-	} catch {
-		// Keep the raw value when it is not URI-encoded.
-	}
-	value = value.replace(/^\[\[/, '').replace(/\]\]$/, '')
-	value = value.split('|')[0]?.trim() ?? ''
-	value = value.replace(/^\/+/, '').replace(/\/+$/, '').trim()
-	return value ? normalizePath(value) : null
-}
 
 export default class ChatboxView extends ItemView {
 	private rootEl!: HTMLDivElement
@@ -71,92 +47,18 @@ export default class ChatboxView extends ItemView {
 	private highlightedEditorView?: EditorView
 	private preservingSelectionForChatFocus = false
 	private readonly renderMarkdown: NonNullable<ChatboxProps['renderMarkdown']> =
-		async (
-			el: HTMLElement,
-			markdown: string,
-			options?: { streaming?: boolean },
-		) => {
-			const app = this.app
-			const plugin = this.plugin
-			const component = new Component()
-			this.addChild(component)
-			component.load()
-
-			const fallbackText = markdown
-			const renderedEl = el.ownerDocument.createElement('div')
-			const sourcePath = this.getMarkdownSourcePath(true)
-
-			try {
-				await MarkdownRenderer.render(
-					app,
-					markdown,
-					renderedEl,
-					sourcePath,
-					component,
-				)
-			} catch (error) {
-				logger.error('Error rendering chat markdown:', error)
-				component.unload()
-				el.replaceChildren()
-				el.textContent = fallbackText
-				return
-			}
-
-			el.replaceChildren(...Array.from(renderedEl.childNodes))
-			if (!el.childNodes.length) {
-				el.textContent = fallbackText
-			}
-
-			if (!options?.streaming) {
-				enhanceHtmlCodeBlocks(el)
-			}
-
-			const onLinkClick = (event: MouseEvent) => {
-				const target = event.target
-				if (!(target instanceof Element)) {
-					return
-				}
-				const anchor = target.closest('a')
-				if (!(anchor instanceof HTMLAnchorElement)) {
-					return
-				}
-
-				const action = resolveMarkdownLinkAction({
-					href: anchor.getAttribute('href'),
-					datasetHref: anchor.getAttribute('data-href'),
-					classNames: Array.from(anchor.classList),
-				})
-				if (action.type === 'none') {
-					return
-				}
-
-				event.preventDefault()
-				event.stopPropagation()
-
-				if (action.type === 'internal') {
-					void app.workspace.openLinkText(action.linktext, sourcePath, false)
-					return
-				}
-
-				if (action.type === 'protocol' && action.providerId) {
-					void plugin.protocolService.openProviderEditor(
-						action.providerId,
-						plugin.chatService.getChatModalMountTarget(),
-					)
-					return
-				}
-
-				window.open(action.href, '_blank', 'noopener,noreferrer')
-			}
-
-			el.addEventListener('click', onLinkClick)
-
-			return () => {
-				el.removeEventListener('click', onLinkClick)
-				component.unload()
-				el.replaceChildren()
-			}
-		}
+		(el, markdown, options) =>
+			renderChatMarkdown(
+				{
+					app: this.app,
+					plugin: this.plugin,
+					addChild: (component) => this.addChild(component),
+					getMarkdownSourcePath: () => this.getMarkdownSourcePath(true),
+				},
+				el,
+				markdown,
+				options,
+			)
 
 	constructor(
 		leaf: WorkspaceLeaf,
@@ -197,46 +99,6 @@ export default class ChatboxView extends ItemView {
 
 	getIcon() {
 		return CHATBOX_AI_ICON_ID
-	}
-
-	private resolveDroppedAbstractFile(path: string): TAbstractFile | null {
-		const normalized = normalizeDroppedVaultPath(path)
-		if (!normalized) return null
-		const candidates = [normalized]
-		if (!/\.[^/]+$/.test(normalized)) {
-			candidates.push(`${normalized}.md`)
-		}
-		for (const candidate of candidates) {
-			const abstract = this.plugin.app.vault.getAbstractFileByPath(candidate)
-			if (abstract) return abstract
-		}
-
-		const basename = normalized.split('/').pop()
-		if (!basename) return null
-		const matches = this.plugin.app.vault.getAllLoadedFiles().filter((file) => {
-			const filePath = normalizePath(file.path)
-			const filePathWithoutMd = filePath.replace(/\.md$/i, '')
-			return (
-				file.name === basename ||
-				filePathWithoutMd === normalized ||
-				filePathWithoutMd.endsWith(`/${basename}`)
-			)
-		})
-		return matches.length === 1 ? matches[0] : null
-	}
-
-	private isVaultImageFile(file: TFile): boolean {
-		return file.path.match(/\.(png|jpe?g|gif|webp|bmp)$/i) !== null
-	}
-
-	private async createDroppedImageContextItem(file: TFile) {
-		const extension = file.extension.toLowerCase()
-		const data = await this.app.vault.readBinary(file)
-		return createImageContextItem(new Blob([data]), {
-			mimeType: `image/${extension === 'jpg' ? 'jpeg' : extension}`,
-			name: file.name,
-			size: file.stat.size,
-		})
 	}
 
 	private clearActiveContextSnapshot() {
@@ -432,40 +294,57 @@ export default class ChatboxView extends ItemView {
 				this.openFileChange(vaultPath, line),
 			onResolveResourceDataUrl: (path, mediaType) =>
 				resolveResourceDataUrl(this.app, path, mediaType),
-			onSendMessage: (text: string, contextItems?: UserContextItem[]) =>
-				this.plugin.chatService.sendMessage(text, contextItems ?? []),
+			onSendMessage: (
+				text: string,
+				contextItems?: UserContextItem[],
+				sessionId?: string,
+			) =>
+				this.plugin.chatService.sendMessage(
+					text,
+					contextItems ?? [],
+					sessionId,
+				),
 			onCaptureActiveContext: () => {
 				this.captureActiveContextSnapshot(true)
 				this.preservingSelectionForChatFocus = !!this.activeSelectionSnapshot
 				this.persistSelectionHighlight(true)
 				this.controller?.update(this.getChatboxProps())
 			},
-			onAddUserContext: (item) => {
-				this.plugin.chatService.addUserContext(item)
+			onAddUserContext: (item, sessionId) => {
+				this.plugin.chatService.addUserContext(item, sessionId)
 			},
 			onDropContextItem: async (path: string) => {
-				const abstract = this.resolveDroppedAbstractFile(path)
+				// K9: the image read below may outlive a session switch; bind the
+				// drop to the session that was active synchronously at entry.
+				const sessionId = viewProps.activeSessionId
+				const abstract = resolveDroppedAbstractFile(this.plugin.app, path)
 				if (!abstract) return
 				if (abstract instanceof TFolder) {
 					this.plugin.chatService.addUserContext(
 						createVaultPathContextItem(abstract.path, 'folder'),
+						sessionId,
 					)
 					return
 				}
 				if (abstract instanceof TFile) {
-					if (this.isVaultImageFile(abstract)) {
+					if (isVaultImageFile(abstract)) {
 						const pending = createPendingContextItem('image', abstract.name)
-						this.plugin.chatService.addUserContext(pending)
+						this.plugin.chatService.addUserContext(pending, sessionId)
 						try {
-							const item = await this.createDroppedImageContextItem(abstract)
+							const item = await createDroppedImageContextItem(
+								this.plugin.app,
+								abstract,
+							)
 							this.plugin.chatService.resolvePendingContextItem(
 								pending.id,
 								item,
+								sessionId,
 							)
 						} catch (error) {
 							this.plugin.chatService.resolvePendingContextItem(
 								pending.id,
 								null,
+								sessionId,
 							)
 							throw error
 						}
@@ -473,15 +352,20 @@ export default class ChatboxView extends ItemView {
 					}
 					this.plugin.chatService.addUserContext(
 						createVaultPathContextItem(abstract.path, 'file'),
+						sessionId,
 					)
 					return
 				}
 			},
-			onRemoveUserContext: (index: number) => {
-				this.plugin.chatService.removeUserContext(index)
+			onRemoveUserContext: (index: number, sessionId?: string) => {
+				this.plugin.chatService.removeUserContext(index, sessionId)
 			},
-			onResolvePendingContextItem: (id: string, replacement) => {
-				this.plugin.chatService.resolvePendingContextItem(id, replacement)
+			onResolvePendingContextItem: (id: string, replacement, sessionId) => {
+				this.plugin.chatService.resolvePendingContextItem(
+					id,
+					replacement,
+					sessionId,
+				)
 			},
 		}
 	}

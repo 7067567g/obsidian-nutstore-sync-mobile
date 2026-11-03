@@ -159,7 +159,8 @@ export async function runWithTimeout<T>(
 		controller.signal.addEventListener(
 			'abort',
 			() => {
-				const reason = controller.signal.reason
+				// AbortSignal.reason is `any` in lib.dom; narrow at the boundary.
+				const reason: unknown = controller.signal.reason
 				reject(reason instanceof Error ? reason : new Error(String(reason)))
 			},
 			{ once: true },
@@ -170,7 +171,7 @@ export async function runWithTimeout<T>(
 		return await Promise.race([run(controller.signal), abortPromise])
 	} catch (error) {
 		if (controller.signal.aborted) {
-			const reason = controller.signal.reason
+			const reason: unknown = controller.signal.reason
 			if (reason instanceof ToolTimeoutError) throw reason
 			if (reason instanceof ToolAbortError) throw reason
 		}

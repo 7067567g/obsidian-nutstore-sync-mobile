@@ -30,6 +30,37 @@ function onlyAscii(str: string) {
 	return !/[^\u0000-\u00ff]/g.test(str)
 }
 
+/**
+ * The Fetch `Response` constructor only accepts status codes in [200, 599].
+ * `requestUrl` can surface status 0 (no response), 1xx informational responses
+ * or non-standard codes; map those into the valid range so building a
+ * `Response` never throws `RangeError`. Same fix as
+ * `src/ai/transport/obsidian-fetch.ts`.
+ */
+function toResponseStatus(status: number): number {
+	if (status < 200) {
+		return 200
+	}
+	if (status > 599) {
+		return 500
+	}
+	return status
+}
+
+/**
+ * `getReasonPhrase` throws "Status code does not exist" for codes that are in
+ * [200, 599] but absent from the `http-status-codes` table (e.g. 499, 520,
+ * 599). Fall back to an empty reason phrase so the response can still be built
+ * and WebDAV traversal/read-write is not interrupted.
+ */
+function toStatusText(status: number): string {
+	try {
+		return getReasonPhrase(status)
+	} catch {
+		return ''
+	}
+}
+
 if (VALID_REQURL) {
 	getPatcher().patch('request', async (args: unknown): Promise<Response> => {
 		const options = args as RequestOptionsWithState
@@ -78,16 +109,17 @@ if (VALID_REQURL) {
 		}
 
 		let r2: Response | undefined
-		const statusText = getReasonPhrase(r.status)
+		const status = toResponseStatus(r.status)
+		const statusText = toStatusText(status)
 		if ([101, 103, 204, 205, 304].includes(r.status)) {
 			r2 = new Response(null, {
-				status: r.status,
+				status,
 				statusText: statusText,
 				headers: rspHeaders,
 			})
 		} else {
 			r2 = new Response(r.arrayBuffer, {
-				status: r.status,
+				status,
 				statusText: statusText,
 				headers: rspHeaders,
 			})

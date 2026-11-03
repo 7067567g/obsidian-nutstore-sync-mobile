@@ -1,9 +1,7 @@
 import { chunk } from 'lodash-es'
-import { Notice, Platform, Vault, moment, normalizePath } from 'obsidian'
-import { dirname } from 'path-browserify'
+import { Notice, Platform, Vault } from 'obsidian'
 import { Subscription } from 'rxjs'
 import { WebDAVClient } from 'webdav'
-import DeleteConfirmModal from '~/components/DeleteConfirmModal'
 import FailedTasksModal, { FailedTaskInfo } from '~/components/FailedTasksModal'
 import TaskListConfirmModal from '~/components/TaskListConfirmModal'
 import {
@@ -22,16 +20,11 @@ import IFileSystem from '~/fs/fs.interface'
 import { LocalVaultFileSystem } from '~/fs/local-vault'
 import { NutstoreFileSystem } from '~/fs/nutstore'
 import i18n from '~/i18n'
-import CacheService from '~/services/cache.service.v1'
+import CacheService from '~/services/cache-v1.service'
 import { SyncPolicy } from '~/settings'
 import { syncRecordKV } from '~/storage'
 import { SyncRecord } from '~/storage/sync-record'
-import {
-	createSyncLogger,
-	formatSyncLogPrefix,
-	type SyncLogger,
-} from '~/sync/log'
-import breakableSleep from '~/utils/breakable-sleep'
+import { createSyncLogger, formatSyncLogPrefix, type SyncLogger } from './log'
 import { computeEffectiveFilterRules } from '~/utils/config-dir-rules'
 import { getDBKey } from '~/utils/get-db-key'
 import getTaskName from '~/utils/get-task-name'
@@ -40,9 +33,8 @@ import {
 	getNutstoreDavEndpoint,
 	getNutstoreNsdavEndpoint,
 } from '~/utils/nutstore-endpoints'
-import { statVaultItem } from '~/utils/stat-vault-item'
 import { stdRemotePath } from '~/utils/std-remote-path'
-import NutstorePlugin from '..'
+import NutstorePlugin from '~/index'
 import ReceiveOnlySyncDecider, {
 	ReceiveOnlyRevertLocalChangesSyncDecider,
 } from './decision/receive-only.decider'
@@ -51,9 +43,7 @@ import SendOnlySyncDecider, {
 } from './decision/send-only.decider'
 import TwoWaySyncDecider from './decision/two-way.decider'
 import CleanRecordTask from './tasks/clean-record.task'
-import ConflictResolveTask, {
-	ConflictStrategy,
-} from './tasks/conflict-resolve.task'
+import ConflictResolveTask from './tasks/conflict-resolve.task'
 import MkdirLocalTask from './tasks/mkdir-local.task'
 import MkdirRemoteTask from './tasks/mkdir-remote.task'
 import NoopTask from './tasks/noop.task'
@@ -62,13 +52,19 @@ import PushTask from './tasks/push.task'
 import RemoveLocalTask from './tasks/remove-local.task'
 import RemoveRemoteTask from './tasks/remove-remote.task'
 import SkippedTask from './tasks/skipped.task'
-import { BaseTask, TaskError, TaskResult } from './tasks/task.interface'
+import { BaseTask, TaskResult } from './tasks/task.interface'
 import { mergeMkdirTasks } from './utils/merge-mkdir-tasks'
 import { mergeRemoveRemoteTasks } from './utils/merge-remove-remote-tasks'
+import { resolveAutoSyncDeleteConfirm } from './delete-confirm'
+import {
+	didTaskReloadPluginSettings,
+	execTasks,
+	handle503Error,
+	updateMtimeInRecord as updateMtimeInRecordImpl,
+} from './task-execution'
 import {
 	countRecordUpdateOperations,
 	type UpdateMtimeProgress,
-	updateMtimeInRecord as updateMtimeInRecordUtil,
 } from './utils/update-records'
 
 export enum SyncStartMode {
@@ -139,7 +135,12 @@ export class NutstoreSync {
 		this.localFS = new LocalVaultFileSystem({
 			vault: this.options.vault,
 			syncRecord: new SyncRecord(
-				getDBKey(this.vault.getName(), this.remoteBaseDir),
+				getDBKey(
+					this.vault.getName(),
+					this.remoteBaseDir,
+					this.options.remoteAccountId,
+					getNutstoreDavEndpoint(plugin.settings),
+				),
 				syncRecordKV,
 			),
 			filterRules,
@@ -189,7 +190,12 @@ export class NutstoreSync {
 				remoteBaseDir,
 			})
 			const syncRecord = new SyncRecord(
-				getDBKey(this.vault.getName(), this.remoteBaseDir),
+				getDBKey(
+					this.vault.getName(),
+					this.remoteBaseDir,
+					this.options.remoteAccountId,
+					getNutstoreDavEndpoint(settings),
+				),
 				syncRecordKV,
 			)
 			const cacheService = new CacheService(this.plugin)
@@ -217,7 +223,7 @@ export class NutstoreSync {
 					break
 				} catch (e) {
 					if (is503Error(e as Error)) {
-						await this.handle503Error(60000)
+						await handle503Error(60000)
 						if (this.isCancelled) {
 							emitSyncCancelled()
 							return {
@@ -343,200 +349,16 @@ export class NutstoreSync {
 				mode === SyncStartMode.AUTO_SYNC &&
 				settings.confirmBeforeDeleteInAutoSync
 			) {
-				const removeLocalTasks = confirmedTasks.filter(
-					(t) => t instanceof RemoveLocalTask,
-				)
-				if (removeLocalTasks.length > 0) {
-					new Notice(i18n.t('deleteConfirm.warningNotice'), 3000)
-					const { tasksToDelete, tasksToReupload } =
-						await new DeleteConfirmModal(
-							this.app,
-							removeLocalTasks,
-						).openAndWait()
-
-					// Create corresponding Push/Mkdir tasks for each task to reupload
-					const reuploadMap = new Map<
-						RemoveLocalTask,
-						PushTask | MkdirRemoteTask
-					>()
-					const mkdirTasksMap = new Map<string, MkdirRemoteTask>()
-					const pushTasks: PushTask[] = []
-					// Cache paths that we've confirmed exist remotely
-					const remoteExistsCache = new Set<string>()
-
-					/**
-					 * Helper function to mark a path and all its parents as existing
-					 */
-					const markPathAndParentsAsExisting = (remotePath: string) => {
-						let current = remotePath
-						while (
-							current &&
-							current !== '.' &&
-							current !== '' &&
-							current !== '/'
-						) {
-							if (remoteExistsCache.has(current)) {
-								break // Already marked, all parents must be marked too
-							}
-							remoteExistsCache.add(current)
-							current = stdRemotePath(dirname(current))
-						}
-					}
-
-					/**
-					 * Helper function to ensure parent directory exists or create mkdir task
-					 */
-					const ensureParentDir = async (
-						localPath: string,
-						remotePath: string,
-					) => {
-						const parentLocalPath = normalizePath(dirname(localPath))
-						const parentRemotePath = stdRemotePath(dirname(remotePath))
-
-						// Root path or vault root, no need to check
-						if (
-							parentLocalPath === '.' ||
-							parentLocalPath === '' ||
-							parentLocalPath === '/'
-						) {
-							return
-						}
-
-						// Already collected in new tasks, no need to check remote
-						if (mkdirTasksMap.has(parentRemotePath)) {
-							return
-						}
-
-						// Check if already exists in original tasks (from decider)
-						const existsInOriginalTasks = tasks.some(
-							(t) =>
-								t instanceof MkdirRemoteTask &&
-								t.remotePath === parentRemotePath,
-						)
-						if (existsInOriginalTasks) {
-							return
-						}
-
-						// Already exists in confirmed tasks, no need to check remote
-						const existsInConfirmedTasks = confirmedTasks.some(
-							(t) =>
-								t instanceof MkdirRemoteTask &&
-								t.remotePath === parentRemotePath,
-						)
-						if (existsInConfirmedTasks) {
-							return
-						}
-
-						// Already confirmed to exist remotely
-						if (remoteExistsCache.has(parentRemotePath)) {
-							return
-						}
-
-						// Check if parent directory exists remotely using webdav.stat
-						try {
-							await webdav.stat(parentRemotePath)
-							// Directory exists, mark it and all parents as existing
-							markPathAndParentsAsExisting(parentRemotePath)
-						} catch (e) {
-							this.logger.error(e)
-							// Directory doesn't exist, create mkdir task
-							// No need to check parent's parent since createDirectory uses recursive: true
-							const mkdirTask = new MkdirRemoteTask({
-								vault: this.vault,
-								webdav: webdav,
-								remoteBaseDir: this.remoteBaseDir,
-								remotePath: parentRemotePath,
-								localPath: parentLocalPath,
-								syncRecord: syncRecord,
-								logger: this.logger,
-							})
-							mkdirTasksMap.set(parentRemotePath, mkdirTask)
-						}
-					}
-
-					for (const task of tasksToReupload) {
-						const stat = await statVaultItem(this.vault, task.localPath)
-						if (!stat) {
-							// File doesn't exist, skip
-							continue
-						}
-
-						// Ensure parent directory exists
-						await ensureParentDir(task.localPath, task.remotePath)
-
-						if (stat.isDir) {
-							// Directory → MkdirRemoteTask
-							const mkdirTask = new MkdirRemoteTask(task.options)
-							reuploadMap.set(task, mkdirTask)
-							mkdirTasksMap.set(task.remotePath, mkdirTask)
-						} else {
-							// File → PushTask
-							const pushTask = new PushTask(task.options)
-							reuploadMap.set(task, pushTask)
-							pushTasks.push(pushTask)
-						}
-					}
-
-					const mkdirTasks = Array.from(mkdirTasksMap.values())
-
-					// Create set of tasks to delete
-					const deleteTaskSet = new Set(tasksToDelete)
-
-					// Remove parent directory delete tasks for reupload files
-					// If we reupload /a/b/c/file.png, we shouldn't delete /a, /a/b, or /a/b/c
-					for (const reuploadTask of tasksToReupload) {
-						let currentPath = normalizePath(reuploadTask.localPath)
-						// Check all parent paths
-						while (
-							currentPath &&
-							currentPath !== '.' &&
-							currentPath !== '' &&
-							currentPath !== '/'
-						) {
-							currentPath = normalizePath(dirname(currentPath))
-							if (
-								currentPath === '.' ||
-								currentPath === '' ||
-								currentPath === '/'
-							) {
-								break
-							}
-							// Find and remove parent directory delete tasks
-							for (const deleteTask of deleteTaskSet) {
-								if (deleteTask.localPath === currentPath) {
-									deleteTaskSet.delete(deleteTask)
-									break
-								}
-							}
-						}
-					}
-
-					// Replace task list, putting mkdir tasks first
-					const otherTasks: BaseTask[] = []
-					const deleteTasks: RemoveLocalTask[] = []
-
-					for (const t of confirmedTasks) {
-						if (!(t instanceof RemoveLocalTask)) {
-							otherTasks.push(t)
-							continue
-						}
-						// If in delete list, keep RemoveLocalTask
-						if (deleteTaskSet.has(t)) {
-							deleteTasks.push(t)
-							continue
-						}
-						// If in reupload list, already in mkdirTasks/pushTasks
-						// If not in any list (user cancelled), skip
-					}
-
-					// Reassemble task list: mkdir → other tasks → push → delete
-					confirmedTasks = [
-						...mkdirTasks,
-						...otherTasks,
-						...pushTasks,
-						...deleteTasks,
-					]
-				}
+				confirmedTasks = await resolveAutoSyncDeleteConfirm({
+					app: this.app,
+					vault: this.vault,
+					webdav,
+					remoteBaseDir: this.remoteBaseDir,
+					syncRecord,
+					logger: this.logger,
+					tasks,
+					confirmedTasks,
+				})
 			}
 
 			const confirmedTasksUniq = Array.from(
@@ -587,14 +409,20 @@ export class NutstoreSync {
 			const allCompletedTasks: CompletedTask[] = []
 
 			for (const taskChunk of taskChunks) {
-				const chunkResult = await this.execTasks(
+				const chunkResult = await execTasks(
+					this,
 					taskChunk,
 					totalDisplayableTasks,
 					allCompletedTasks,
 				)
 				allTasksResult.push(...chunkResult)
 				shouldReloadSettings ||= taskChunk.some((task, index) =>
-					this.didTaskReloadPluginSettings(task, chunkResult[index]),
+					didTaskReloadPluginSettings(
+						this.plugin,
+						this.vault,
+						task,
+						chunkResult[index],
+					),
 				)
 				await this.updateMtimeInRecord(
 					taskChunk,
@@ -661,162 +489,20 @@ export class NutstoreSync {
 		}
 	}
 
-	private didTaskReloadPluginSettings(task: BaseTask, result?: TaskResult) {
-		if (!result?.success || !this.isPluginSettingsPath(task.localPath)) {
-			return false
-		}
-
-		if (task instanceof PullTask || task instanceof RemoveLocalTask) {
-			return true
-		}
-
-		if (task instanceof ConflictResolveTask) {
-			return [
-				ConflictStrategy.NoConflictMerge,
-				ConflictStrategy.Diff3,
-				ConflictStrategy.ServerPriority,
-			].includes(task.options.strategy)
-		}
-
-		return false
-	}
-
-	private isPluginSettingsPath(localPath: string) {
-		const pluginDir = normalizePath(
-			`${this.vault.configDir}/plugins/${this.plugin.manifest.id}`,
-		)
-		return (
-			localPath === `${pluginDir}/data.json` ||
-			localPath === `${pluginDir}/data.local.json`
-		)
-	}
-
-	private async execTasks(
-		tasks: BaseTask[],
-		totalDisplayableTasks: BaseTask[],
-		allCompletedTasks: CompletedTask[],
-	) {
-		const res: TaskResult[] = []
-		// Filter out NoopTask and CleanRecordTask from total count for progress display
-		const tasksToDisplay = tasks.filter(
-			(t) => !(t instanceof NoopTask || t instanceof CleanRecordTask),
-		)
-
-		this.logger.debug(`Starting to execute sync tasks`, {
-			totalTasks: tasks.length,
-			displayedTasks: tasksToDisplay.length,
-			totalDisplayableTasks: totalDisplayableTasks.length,
-			alreadyCompleted: allCompletedTasks.length,
-		})
-
-		for (let i = 0; i < tasks.length; ++i) {
-			const task = tasks[i]
-			if (this.isCancelled) {
-				break
-			}
-
-			const isDisplayable = !(
-				task instanceof NoopTask || task instanceof CleanRecordTask
-			)
-
-			this.logger.debug(
-				`Executing task [${i + 1}/${tasks.length}] ${task.localPath}`,
-				{
-					taskName: getTaskName(task),
-					taskPath: task.localPath,
-				},
-			)
-
-			if (isDisplayable) {
-				emitSyncProgress(totalDisplayableTasks.length, allCompletedTasks, task)
-			}
-
-			const taskResult = await this.executeWithRetry(task)
-
-			this.logger.debug(
-				`Task completed [${i + 1}/${tasks.length}] ${task.localPath}`,
-				{
-					taskName: getTaskName(task),
-					taskPath: task.localPath,
-					result: taskResult,
-				},
-			)
-
-			res[i] = taskResult
-			if (isDisplayable) {
-				allCompletedTasks.push({ task, success: taskResult.success })
-				// Keep current=task so the header doesn't flicker between tasks
-				emitSyncProgress(totalDisplayableTasks.length, allCompletedTasks, task)
-			}
-		}
-
-		const successCount = res.filter((r) => r.success).length
-		this.logger.debug(`All tasks execution completed`, {
-			totalTasks: tasks.length,
-			successCount: successCount,
-			failedCount: tasks.length - successCount,
-		})
-
-		return res
-	}
-
-	/**
-	 * Automatically handle 503 errors and retry task execution
-	 */
-	private async executeWithRetry(task: BaseTask): Promise<TaskResult> {
-		let retryCount = 0
-		while (true) {
-			if (this.isCancelled) {
-				return {
-					success: false,
-					error: new TaskError(i18n.t('sync.cancelled'), task),
-				}
-			}
-			const taskResult = await task.exec()
-			if (!taskResult.success && is503Error(taskResult.error)) {
-				retryCount++
-				this.logger.warn(
-					`[Sync] 503 on ${task.localPath}, retry #${retryCount} in 60s`,
-				)
-				await this.handle503Error(60000)
-				if (this.isCancelled) {
-					return {
-						success: false,
-						error: new TaskError(i18n.t('sync.cancelled'), task),
-					}
-				}
-				continue
-			}
-			return taskResult
-		}
-	}
-
 	async updateMtimeInRecord(
 		tasks: BaseTask[],
 		results: TaskResult[],
 		progress: UpdateMtimeProgress,
 	) {
-		return updateMtimeInRecordUtil(
+		return updateMtimeInRecordImpl(
 			this.plugin,
 			this.vault,
 			this.remoteBaseDir,
 			tasks,
 			results,
-			10,
 			this.logger,
 			progress,
 		)
-	}
-
-	private async handle503Error(waitMs: number) {
-		const now = Date.now()
-		const startAt = now + waitMs
-		new Notice(
-			i18n.t('sync.requestsTooFrequent', {
-				time: moment(startAt).format('HH:mm:ss'),
-			}),
-		)
-		await breakableSleep(onCancelSync(), startAt - now)
 	}
 
 	get app() {

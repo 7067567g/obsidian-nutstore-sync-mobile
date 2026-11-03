@@ -16,15 +16,12 @@ import {
 	captureWorkspaceContexts,
 	computeChangedContexts,
 } from '~/ai/chat/context/workspace-context'
-import { normalizeReversibleToolOpRecord } from '~/ai/chat/messages/reversible-op-utils'
+import { normalizeReversibleToolOpRecord } from './reversible-op-utils'
 import createId from '~/utils/create-id'
 import logger from '~/utils/logger'
 import type { SkillRepository } from '~/ai/skills/repository'
 import type { App } from 'obsidian'
-import {
-	modelMessageToUIMessage,
-	removeIncompleteToolCalls,
-} from '~/ai/chat/messages/ui-message'
+import { modelMessageToUIMessage, finalizeAbortedToolCalls } from './ui-message'
 
 export class MessageFactory {
 	constructor(
@@ -151,8 +148,12 @@ export class MessageFactory {
 		return true
 	}
 
-	removeIncompleteToolCalls(agent: ChatAgentState) {
-		return removeIncompleteToolCalls(agent)
+	abortIncompleteToolCalls(agent: ChatAgentState) {
+		return finalizeAbortedToolCalls(agent)
+	}
+
+	failIncompleteToolCalls(agent: ChatAgentState) {
+		return finalizeAbortedToolCalls(agent, 'unknown')
 	}
 
 	reportFatalError(

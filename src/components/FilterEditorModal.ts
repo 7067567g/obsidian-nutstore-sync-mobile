@@ -7,7 +7,7 @@ import {
 	getUserOptions,
 	GlobFilterRule,
 } from '~/utils/glob-match'
-import NutstorePlugin from '..'
+import NutstorePlugin from '~/index'
 
 export default class FilterEditorModal extends Modal {
 	rules: GlobFilterRule[]

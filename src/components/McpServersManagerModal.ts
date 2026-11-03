@@ -8,10 +8,11 @@ import i18n from '~/i18n'
 import type { McpServerRuntimeInfo } from '~/services/mcp.service'
 import { addClassTokens, removeClassTokens } from '~/utils/class-tokens'
 import logger from '~/utils/logger'
-import type NutstorePlugin from '..'
+import type NutstorePlugin from '~/index'
 import McpServerEditorModal, {
 	type McpServerDraft,
 } from './McpServerEditorModal'
+import { cloneHttpConfig } from './mcp-servers-manager-modal.helpers'
 
 export default class McpServersManagerModal extends Modal {
 	constructor(
@@ -238,14 +239,5 @@ export default class McpServersManagerModal extends Modal {
 
 	onClose() {
 		this.contentEl.empty()
-	}
-}
-
-function cloneHttpConfig(config: McpServerConfigs[string]) {
-	return {
-		type: 'http' as const,
-		url: config.url,
-		headers: config.headers ? { ...config.headers } : undefined,
-		enabled: config.enabled,
 	}
 }

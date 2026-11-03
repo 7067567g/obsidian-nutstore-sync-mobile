@@ -95,7 +95,9 @@ function selectValues(value: unknown, tokens: Token[]): unknown[] {
 		for (const item of current) {
 			if (token.kind === 'wildcard') {
 				if (Array.isArray(item)) {
-					next.push(...item)
+					// Array.isArray narrows to `any[]`; the selector works on
+					// `unknown` values, so make that widening explicit.
+					next.push(...(item as unknown[]))
 				} else if (item !== null && typeof item === 'object') {
 					next.push(...Object.values(item as Record<string, unknown>))
 				}
@@ -103,7 +105,7 @@ function selectValues(value: unknown, tokens: Token[]): unknown[] {
 			}
 			if (token.kind === 'index') {
 				if (Array.isArray(item)) {
-					const picked = item[token.value]
+					const picked: unknown = item[token.value]
 					if (picked !== undefined) next.push(picked)
 				}
 				continue

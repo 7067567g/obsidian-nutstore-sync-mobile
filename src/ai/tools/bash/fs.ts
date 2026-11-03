@@ -1,4 +1,3 @@
-import { fromUint8Array } from 'js-base64'
 import {
 	type BufferEncoding,
 	type CpOptions,
@@ -22,11 +21,6 @@ import type {
 } from '~/ai/tools/file-operation'
 import { listAvailableAdapterEntries } from '~/ai/tools/available-adapter-entries'
 import type { PermissionGuard } from '~/ai/tools/permission-guard'
-import type { ReversibleFileSnapshot, ReversibleToolOp } from '~/ai/chat/types'
-import {
-	decodeReversibleFileSnapshot,
-	isSkippedFileSnapshot,
-} from '~/ai/chat/messages/reversible-content'
 import { mkdirsVault } from '~/utils/mkdirs-vault'
 import {
 	existsLocalPath,
@@ -38,165 +32,40 @@ import {
 import { statVaultItem } from '~/utils/stat-vault-item'
 import { perfMetrics } from '~/diagnostics/perf-metrics'
 
+import {
+	decodeContent,
+	encodeContent,
+	toArrayBuffer,
+	type ReadFileOptions,
+	type WriteFileOptions,
+} from './fs-encoding'
+import {
+	ensureNotEscapingRoot,
+	joinVirtualPath,
+	MutableVaultPathIndex,
+	type VaultPathIndex,
+} from './fs-path-index'
+import {
+	isSensitivePermissionPath,
+	type UnguardedWriteReason,
+} from './fs-permission'
+import type { BashResourceBudget } from './fs-resource-budget'
 import { AGENTS_VAULT_PATH } from './mount-points'
 
 const FILE_MODE = 0o644
 const DIR_MODE = 0o755
-type ReadFileOptions = { encoding?: BufferEncoding | null }
-type WriteFileOptions = { encoding?: BufferEncoding }
 
-export const BASH_DEFAULT_MAX_WRITE_BYTES = 64 * 1024 * 1024
-export const BASH_DEFAULT_MAX_WRITE_OPERATIONS = 2000
-export const BASH_DEFAULT_MAX_RECURSION_DEPTH = 32
-
-export interface BashResourceLimits {
-	maxWriteBytes?: number
-	maxWriteOperations?: number
-	maxRecursionDepth?: number
-}
-
-/** Per-command write-volume/recursion budget for the virtual filesystem. */
-export class BashResourceBudget {
-	private writeBytes = 0
-	private writeOperations = 0
-
-	constructor(private readonly limits: BashResourceLimits = {}) {}
-
-	recordWrite(bytes: number) {
-		const maxBytes = this.limits.maxWriteBytes ?? BASH_DEFAULT_MAX_WRITE_BYTES
-		const maxOperations =
-			this.limits.maxWriteOperations ?? BASH_DEFAULT_MAX_WRITE_OPERATIONS
-		if (this.writeOperations + 1 > maxOperations) {
-			throw new Error(
-				'TOOL_RESOURCE_EXCEEDED: bash write operation limit reached (' +
-					maxOperations +
-					' operation(s)); narrow the command or split it into smaller steps.',
-			)
-		}
-		if (this.writeBytes + bytes > maxBytes) {
-			throw new Error(
-				'TOOL_RESOURCE_EXCEEDED: bash write volume exceeds ' +
-					maxBytes +
-					' bytes; narrow the command or use a smaller batch.',
-			)
-		}
-		this.writeOperations += 1
-		this.writeBytes += bytes
-	}
-
-	checkRecursionDepth(depth: number) {
-		const maxDepth =
-			this.limits.maxRecursionDepth ?? BASH_DEFAULT_MAX_RECURSION_DEPTH
-		if (depth > maxDepth) {
-			throw new Error(
-				'TOOL_RESOURCE_EXCEEDED: bash recursion depth exceeds ' +
-					maxDepth +
-					'; narrow the recursive command.',
-			)
-		}
-	}
-}
-
-export function createBashResourceBudget(limits?: BashResourceLimits) {
-	return new BashResourceBudget(limits)
-}
-
-function getEncoding(
-	options?: ReadFileOptions | WriteFileOptions | BufferEncoding | null,
-) {
-	if (!options) {
-		return 'utf8'
-	}
-	return typeof options === 'string' ? options : (options.encoding ?? 'utf8')
-}
-
-export function decodeContent(
-	content: Uint8Array,
-	options?: ReadFileOptions | BufferEncoding,
-) {
-	const encoding = getEncoding(options)
-	if (encoding === 'base64') {
-		return fromUint8Array(content, false)
-	}
-	if (encoding === 'hex') {
-		return Array.from(content)
-			.map((byte) => byte.toString(16).padStart(2, '0'))
-			.join('')
-	}
-	if (encoding === 'binary' || encoding === 'latin1') {
-		const chunkSize = 0x8000
-		let result = ''
-		for (let i = 0; i < content.length; i += chunkSize) {
-			result += String.fromCharCode(
-				...content.subarray(i, Math.min(i + chunkSize, content.length)),
-			)
-		}
-		return result
-	}
-	return new TextDecoder('utf-8').decode(content)
-}
-
-export function encodeContent(
-	content: FileContent,
-	options?: WriteFileOptions | BufferEncoding,
-) {
-	if (content instanceof Uint8Array) {
-		return content
-	}
-
-	const encoding = getEncoding(options)
-	if (encoding === 'base64') {
-		if (typeof Buffer !== 'undefined') {
-			return Uint8Array.from(Buffer.from(content, 'base64'))
-		}
-		const decoded = atob(content)
-		return Uint8Array.from(decoded, (char) => char.charCodeAt(0))
-	}
-	if (encoding === 'hex') {
-		const bytes = new Uint8Array(content.length / 2)
-		for (let i = 0; i < content.length; i += 2) {
-			bytes[i / 2] = Number.parseInt(content.slice(i, i + 2), 16)
-		}
-		return bytes
-	}
-	if (encoding === 'binary' || encoding === 'latin1') {
-		const bytes = new Uint8Array(content.length)
-		for (let i = 0; i < content.length; i++) {
-			bytes[i] = content.charCodeAt(i) & 0xff
-		}
-		return bytes
-	}
-
-	return new TextEncoder().encode(content)
-}
-
-export function toArrayBuffer(content: Uint8Array) {
-	return content.buffer.slice(
-		content.byteOffset,
-		content.byteOffset + content.byteLength,
-	) as ArrayBuffer
-}
-
-function getPathDepth(path: string) {
-	return path.split('/').filter(Boolean).length
-}
-
-function normalizeVirtualPath(inputPath: string) {
-	const normalized = pathPosix.normalize(pathPosix.resolve('/', inputPath))
-	return normalized === '' ? '/' : normalized
-}
-
-function joinVirtualPath(parent: string, name: string) {
-	return parent === '/' ? `/${name}` : `${parent}/${name}`
-}
-
-function ensureNotEscapingRoot(inputPath: string) {
-	const normalized = normalizeVirtualPath(inputPath)
-	if (!normalized.startsWith('/')) {
-		throw new Error(`EINVAL: invalid path '${inputPath}'`)
-	}
-	return normalized
-}
+export {
+	BASH_DEFAULT_MAX_RECURSION_DEPTH,
+	BASH_DEFAULT_MAX_WRITE_BYTES,
+	BASH_DEFAULT_MAX_WRITE_OPERATIONS,
+	createBashResourceBudget,
+} from './fs-resource-budget'
+export { decodeContent, encodeContent, toArrayBuffer }
+export { ReversibleOpRecorder } from './fs-reversible-recorder'
+export { BashResourceBudget } from './fs-resource-budget'
+export type { BashResourceLimits } from './fs-resource-budget'
+export type { UnguardedWriteReason }
 
 async function copyRecursive(
 	fs: IFileSystem,
@@ -230,136 +99,6 @@ async function copyRecursive(
 	await fs.writeFile(dest, content)
 }
 
-interface VaultPathIndex {
-	getAllPaths(): string[]
-	recordPath(path: string): void
-	forgetPath(path: string): void
-}
-
-class MutableVaultPathIndex implements VaultPathIndex {
-	private readonly paths = new Set<string>(['/'])
-
-	constructor(initialPaths: string[] = []) {
-		for (const path of initialPaths) this.recordPath(path)
-	}
-
-	recordPath(inputPath: string) {
-		const normalized = ensureNotEscapingRoot(inputPath)
-		this.paths.add('/')
-		let current = ''
-		for (const part of normalized.split('/').filter(Boolean)) {
-			current = `${current}/${part}`
-			this.paths.add(current)
-		}
-	}
-
-	forgetPath(inputPath: string) {
-		const normalized = ensureNotEscapingRoot(inputPath)
-		for (const path of [...this.paths]) {
-			if (path === normalized || path.startsWith(`${normalized}/`)) {
-				this.paths.delete(path)
-			}
-		}
-		this.paths.add('/')
-	}
-
-	getAllPaths() {
-		return [...this.paths].sort()
-	}
-}
-
-export class ReversibleOpRecorder {
-	private captureDepth = 0
-	private readonly virtualInitial = new Map<
-		string,
-		ReversibleFileSnapshot | { kind: 'dir' } | undefined
-	>()
-	private readonly virtualLatest = new Map<
-		string,
-		ReversibleFileSnapshot | { kind: 'dir' } | undefined
-	>()
-
-	get isCapturing() {
-		return this.captureDepth > 0
-	}
-	beginCapture() {
-		this.captureDepth++
-	}
-	endCapture() {
-		this.captureDepth--
-	}
-
-	recordVirtualTransition(
-		path: string,
-		before: ReversibleFileSnapshot | { kind: 'dir' } | undefined,
-		after: ReversibleFileSnapshot | { kind: 'dir' } | undefined,
-	) {
-		if (!this.virtualInitial.has(path)) this.virtualInitial.set(path, before)
-		this.virtualLatest.set(path, after)
-	}
-
-	private async sameFileContent(
-		left: Extract<ReversibleToolOp, { operation: 'update' }>['before'],
-		right: Extract<ReversibleToolOp, { operation: 'update' }>['before'],
-	) {
-		if (isSkippedFileSnapshot(left) || isSkippedFileSnapshot(right)) {
-			// Without retained content we cannot prove equality; keep the
-			// transition recorded so the operation is not silently dropped.
-			return false
-		}
-		const [leftBuffer, rightBuffer] = await Promise.all([
-			decodeReversibleFileSnapshot(left),
-			decodeReversibleFileSnapshot(right),
-		])
-		const leftBytes = new Uint8Array(leftBuffer)
-		const rightBytes = new Uint8Array(rightBuffer)
-		return (
-			leftBytes.length === rightBytes.length &&
-			leftBytes.every((byte, index) => byte === rightBytes[index])
-		)
-	}
-
-	async getNetOperations(): Promise<ReversibleToolOp[]> {
-		const result: ReversibleToolOp[] = []
-		for (const [path, initial] of [...this.virtualInitial].sort(
-			([left], [right]) => {
-				const depth = getPathDepth(left) - getPathDepth(right)
-				return depth !== 0 ? depth : left.localeCompare(right)
-			},
-		)) {
-			const after = this.virtualLatest.get(path)
-			if (!initial && after) {
-				result.push({
-					vaultPath: path,
-					operation: 'create',
-					before: { kind: after.kind },
-					after,
-				})
-			} else if (initial && !after) {
-				result.push({ vaultPath: path, operation: 'delete', before: initial })
-			} else if (initial?.kind === 'file' && after?.kind === 'file') {
-				if (!(await this.sameFileContent(initial, after))) {
-					result.push({
-						vaultPath: path,
-						operation: 'update',
-						before: initial,
-						after,
-					})
-				}
-			} else if (initial && after && initial.kind !== after.kind) {
-				result.push({ vaultPath: path, operation: 'delete', before: initial })
-				result.push({
-					vaultPath: path,
-					operation: 'create',
-					before: { kind: after.kind },
-					after,
-				})
-			}
-		}
-		return result
-	}
-}
-
 export class ObsidianVaultFs implements IFileSystem {
 	private _batchDepth = 0
 	private readonly pathIndex: VaultPathIndex
@@ -370,10 +109,20 @@ export class ObsidianVaultFs implements IFileSystem {
 		private readonly permissionGuard?: PermissionGuard,
 		private readonly onRead?: (vaultPath: string) => void,
 		private readonly budget?: BashResourceBudget,
+		private readonly unguardedWrite?: UnguardedWriteReason,
+		private readonly abortSignal?: AbortSignal,
 	) {
 		this.pathIndex = Array.isArray(initialPaths)
 			? new MutableVaultPathIndex(initialPaths)
 			: initialPaths
+	}
+
+	/** Cooperative cancellation propagated from runWithTimeout. */
+	private throwIfAborted(): void {
+		if (!this.abortSignal?.aborted) return
+		const error = new Error('Aborted')
+		error.name = 'AbortError'
+		throw error
 	}
 
 	private async withBatch<T>(fn: () => Promise<T>): Promise<T> {
@@ -390,7 +139,35 @@ export class ObsidianVaultFs implements IFileSystem {
 			| { kind: AISinglePathFileOperation; path: string }
 			| { kind: AIDualPathFileOperation; src: string; dest: string },
 	): Promise<void> {
-		if (this._batchDepth > 0 || !this.permissionGuard) return
+		if ('src' in request) {
+			if (
+				isSensitivePermissionPath(request.src, this.vault.configDir) ||
+				isSensitivePermissionPath(request.dest, this.vault.configDir)
+			) {
+				throw new Error(
+					'SENSITIVE_PATH_DENIED: bash cannot modify the Obsidian config dir or internal session/diagnostics paths.',
+				)
+			}
+		} else if (isSensitivePermissionPath(request.path, this.vault.configDir)) {
+			throw new Error(
+				'SENSITIVE_PATH_DENIED: bash cannot modify the Obsidian config dir or internal session/diagnostics paths.',
+			)
+		}
+		// P-003 / D-003: AI tool writes are fail-closed at the tool boundary:
+		// `withPermissionPurpose` (permission-guard.ts) returns a denying guard
+		// when a tool context has no guard. Writes that intentionally run
+		// outside a tool call — the user-initiated virtual recall restore in
+		// `message-ops.ts`, plus the Obsidian integration harness — must now
+		// declare `unguardedWrite`; without a guard AND without that declaration
+		// every write fails closed with EPERM.
+		if (!this.permissionGuard) {
+			if (this.unguardedWrite) return
+			const path = 'src' in request ? request.src : request.path
+			throw new Error(
+				`EPERM: ${request.kind} '${this.toPermissionPath(path)}' requires a permission guard or an explicit unguardedWrite declaration`,
+			)
+		}
+		if (this._batchDepth > 0) return
 		const normalizedRequest =
 			'src' in request
 				? {
@@ -517,7 +294,9 @@ export class ObsidianVaultFs implements IFileSystem {
 	}
 
 	async readFileBuffer(path: string): Promise<Uint8Array> {
+		this.throwIfAborted()
 		const result = await this.readInternal(path)
+		this.throwIfAborted()
 		this.onRead?.(this.toVaultPath(path))
 		return result
 	}
@@ -579,6 +358,7 @@ export class ObsidianVaultFs implements IFileSystem {
 	}
 
 	async exists(path: string): Promise<boolean> {
+		this.throwIfAborted()
 		const normalized = ensureNotEscapingRoot(path)
 		if (normalized === '/') {
 			return true
@@ -588,6 +368,7 @@ export class ObsidianVaultFs implements IFileSystem {
 	}
 
 	async stat(path: string): Promise<FsStat> {
+		this.throwIfAborted()
 		const normalized = ensureNotEscapingRoot(path)
 		if (normalized === '/') {
 			return {
@@ -653,6 +434,7 @@ export class ObsidianVaultFs implements IFileSystem {
 	}
 
 	async readdir(path: string): Promise<string[]> {
+		this.throwIfAborted()
 		const stat = await this.stat(path)
 		if (!stat.isDirectory) {
 			throw new Error(`ENOTDIR: not a directory, scandir '${path}'`)
@@ -664,6 +446,7 @@ export class ObsidianVaultFs implements IFileSystem {
 	}
 
 	async readdirWithFileTypes(path: string) {
+		this.throwIfAborted()
 		const stat = await this.stat(path)
 		if (!stat.isDirectory) {
 			throw new Error(`ENOTDIR: not a directory, scandir '${path}'`)
@@ -789,6 +572,7 @@ export class ObsidianVaultFs implements IFileSystem {
 	}
 
 	getAllPaths(): string[] {
+		this.throwIfAborted()
 		return this.pathIndex.getAllPaths()
 	}
 

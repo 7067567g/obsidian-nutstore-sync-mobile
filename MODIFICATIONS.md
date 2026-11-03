@@ -3,14 +3,14 @@
 This repository is a **mobile custom build** based on
 [`nutstore/obsidian-nutstore-sync`](https://github.com/nutstore/obsidian-nutstore-sync).
 
-The current version is **1.5.5**; all differences from upstream in this repository
+The current version is **1.5.8**; all differences from upstream in this repository
 are the maintainer's own custom modifications, maintained as a single line of work.
 The original upstream project is a general-purpose Obsidian sync plugin; this
 repository is tuned for the maintainer's own daily mobile / Obsidian usage.
 
 - Upstream base: `79d35b4e8b47ac43d3531ceb888a722ee942dc5e`
-- Current version: `1.5.5`
-- Build tag: `v1.5.5-mobile.1`
+- Current version: `1.5.8`
+- Build tag: `v1.5.8-mobile.1`
 - License: GNU Affero General Public License v3.0 only, see `LICENSE`
 - The original copyright and license notices are preserved.
 
@@ -27,6 +27,9 @@ Custom modifications include, but are not limited to:
 - multiple labeled image attachments in the model loop;
 - bounded tool output (head/tail + spill), session recovery safety, tool
   timeout/abort/heartbeat, regex/JSON/image/Bash guard rails;
+- abort-aware grep/rg and large-file/pathological-regex fail-fast;
+- signature-cached session persistence with TTL freshness checks and session windowing/retention;
+- provider custom headers and OpenCode Go automatic session header;
 - mobile-oriented tool routing and local build/install scripts.
 
 ## Redistribution

@@ -3,7 +3,7 @@ import {
 	decodeReversibleFileSnapshot,
 	isSkippedFileSnapshot,
 } from './reversible-content'
-import type { ReversibleFileSnapshot, ReversibleToolOp } from '../types'
+import type { ReversibleFileSnapshot, ReversibleToolOp } from '~/ai/chat/types'
 
 const CONTEXT_LINES = 2
 

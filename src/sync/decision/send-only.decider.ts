@@ -1,18 +1,18 @@
-import { parse as bytesParse } from 'bytes-iec'
 import { hasInvalidChar } from '~/utils/has-invalid-char'
 import remotePathToAbsolute from '~/utils/remote-path-to-absolute'
 import { remotePathToLocalPath } from '~/utils/remote-path-to-local-path'
-import { hasFolderContentChanged } from '../core/has-folder-content-changed'
-import { areLooseEqualFiles } from '../core/loose-equality'
-import { getFileChanges, getRemoteFileChanged } from '../core/file-changes'
-import { shouldCreateCleanRecordTask } from '../core/record-cleanup'
-import { SkipReason } from '../tasks/skipped.task'
-import { BaseTask } from '../tasks/task.interface'
+import { hasFolderContentChanged } from '~/sync/core/has-folder-content-changed'
+import { areLooseEqualFiles } from '~/sync/core/loose-equality'
+import { getFileChanges, getRemoteFileChanged } from '~/sync/core/file-changes'
+import { shouldCreateCleanRecordTask } from '~/sync/core/record-cleanup'
+import { SkipReason } from '~/sync/tasks/skipped.task'
+import { BaseTask } from '~/sync/tasks/task.interface'
 import {
 	getIgnoredPathsInFolder,
 	hasIgnoredInFolder,
-} from '../utils/has-ignored-in-folder'
+} from '~/sync/utils/has-ignored-in-folder'
 import BaseSyncDecider from './base.decider'
+import { pushFileTooLargeTask, resolveMaxFileSize } from './size-guard'
 import { SyncDecisionInput } from './sync-decision.interface'
 
 export default class SendOnlySyncDecider extends BaseSyncDecider {
@@ -51,11 +51,7 @@ export async function sendOnlyDecider(
 		taskFactory,
 	} = input
 
-	let maxFileSize = Infinity
-	const maxFileSizeStr = settings.skipLargeFiles.maxSize.trim()
-	if (maxFileSizeStr !== '') {
-		maxFileSize = bytesParse(maxFileSizeStr, { mode: 'jedec' }) ?? Infinity
-	}
+	const maxFileSize = resolveMaxFileSize(settings)
 
 	const localStatsFiltered = localStats
 		.filter((item) => !item.ignored)
@@ -90,15 +86,10 @@ export async function sendOnlyDecider(
 			localSize > maxFileSize ||
 			(remoteSize !== undefined && remoteSize > maxFileSize)
 		) {
-			tasks.push(
-				taskFactory.createSkippedTask({
-					...taskOptions,
-					reason: SkipReason.FileTooLarge,
-					maxSize: maxFileSize,
-					localSize,
-					...(remoteSize === undefined ? {} : { remoteSize }),
-				}),
-			)
+			pushFileTooLargeTask(tasks, taskFactory, taskOptions, maxFileSize, {
+				localSize,
+				remoteSize,
+			})
 			return false
 		}
 		if (hasInvalidChar(p)) {
@@ -116,14 +107,9 @@ export async function sendOnlyDecider(
 			remoteBaseDir,
 		}
 		if (remoteSize > maxFileSize) {
-			tasks.push(
-				taskFactory.createSkippedTask({
-					...taskOptions,
-					reason: SkipReason.FileTooLarge,
-					maxSize: maxFileSize,
-					remoteSize,
-				}),
-			)
+			pushFileTooLargeTask(tasks, taskFactory, taskOptions, maxFileSize, {
+				remoteSize,
+			})
 			return false
 		}
 		tasks.push(taskFactory.createRemoveRemoteTask(taskOptions))

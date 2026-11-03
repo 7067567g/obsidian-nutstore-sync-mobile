@@ -1,9 +1,12 @@
-import type NutstorePlugin from '..'
+import type NutstorePlugin from '~/index'
 import { formatLocalTimestampForFilename } from '~/utils/local-date'
 import logger from '~/utils/logger'
 import { DIAGNOSTICS_EXPORT_DIR } from './log-file'
 import { perfMetrics } from './perf-metrics'
 import { runSelfCheck } from './self-check'
+import { readStartupState } from './startup-state'
+
+export const PERF_SNAPSHOT_FILE = `${DIAGNOSTICS_EXPORT_DIR}/perf-snapshot.json`
 
 export interface ExportDiagnosticsOptions {
 	reason?: 'startup' | 'manual'
@@ -16,6 +19,37 @@ export interface ExportDiagnosticsOptions {
  * timings/counters and recent plugin logs; it never includes account
  * credentials, vault document bodies, or chat message content.
  */
+/**
+ * Lightweight runtime perf snapshot for long tasks and lifecycle exits. The
+ * full diagnostics package is written only at startup; this file is rewritten
+ * on pagehide/visibility-hidden/unload so heartbeat and bridge counters are
+ * observable after the relevant work has already happened.
+ */
+export async function exportPerfSnapshot(
+	plugin: NutstorePlugin,
+	options: { reason: 'visibility' | 'pagehide' | 'unload' | 'manual' } = {
+		reason: 'manual',
+	},
+): Promise<string> {
+	const payload = {
+		schemaVersion: 1,
+		reason: options.reason,
+		generatedAt: new Date().toISOString(),
+		plugin: {
+			id: plugin.manifest.id,
+			version: plugin.manifest.version,
+		},
+		startupState: await readStartupState(plugin.app),
+		perf: perfMetrics.snapshot(),
+	}
+	await plugin.diagnosticsLogFile.ensureDirectory(DIAGNOSTICS_EXPORT_DIR)
+	await plugin.app.vault.adapter.write(
+		PERF_SNAPSHOT_FILE,
+		`${JSON.stringify(payload, null, 2)}\n`,
+	)
+	return PERF_SNAPSHOT_FILE
+}
+
 export async function exportDiagnosticsPackage(
 	plugin: NutstorePlugin,
 	options: ExportDiagnosticsOptions = {},
@@ -29,6 +63,7 @@ export async function exportDiagnosticsPackage(
 		plugin.diagnosticsLogFile.readRecent(256 * 1024),
 		plugin.diagnosticsLogFile.listLogFiles(),
 	])
+	const startupState = await readStartupState(plugin.app)
 	const payload = {
 		schemaVersion: 1,
 		reason,
@@ -38,6 +73,7 @@ export async function exportDiagnosticsPackage(
 			version: plugin.manifest.version,
 		},
 		selfCheck,
+		startupState,
 		perf: perfMetrics.snapshot(),
 		logFiles,
 		recentLog,

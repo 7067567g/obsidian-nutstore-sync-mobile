@@ -1,6 +1,6 @@
 import { clamp } from 'lodash-es'
 import { SyncStartMode } from '~/sync'
-import type NutstorePlugin from '..'
+import type NutstorePlugin from '~/index'
 import { BaseService } from './service.interface'
 import type SyncExecutorService from './sync-executor.service'
 

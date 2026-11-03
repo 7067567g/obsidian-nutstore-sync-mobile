@@ -1,13 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { ChatState } from '~/ai/chat/runtime/chat-state'
-import {
-	claimNextTurn,
-	enqueueUserSubmission,
-} from '~/ai/chat/runtime/master-turn-scheduler'
-import {
-	isSessionExecutionPending,
-	RuntimeStates,
-} from '~/ai/chat/runtime/runtime-state'
+import { ChatState } from './chat-state'
+import { claimNextTurn, enqueueUserSubmission } from './master-turn-scheduler'
+import { isSessionExecutionPending, RuntimeStates } from './runtime-state'
 
 describe('RuntimeStates', () => {
 	it('uses execution ownership rather than UI state to gate work', () => {

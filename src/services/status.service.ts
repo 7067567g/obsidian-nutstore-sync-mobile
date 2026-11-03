@@ -1,7 +1,7 @@
 import { Notice } from 'obsidian'
-import i18n from '../i18n'
-import NutstorePlugin from '../index'
-import { formatRelativeTime } from '../utils/format-relative-time'
+import i18n from '~/i18n'
+import NutstorePlugin from '~/index'
+import { formatRelativeTime } from '~/utils/format-relative-time'
 import { BaseService } from './service.interface'
 
 export class StatusService extends BaseService {

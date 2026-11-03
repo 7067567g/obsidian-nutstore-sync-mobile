@@ -6,7 +6,7 @@ import {
 	getOperationFilePath,
 	hydrateSessionOperations,
 	OPERATIONS_REF_MARKER,
-} from '~/ai/chat/session/session-operations'
+} from './session-operations'
 
 function makeSession(operations: unknown) {
 	return {

@@ -1,7 +1,21 @@
-import { normalizePath, TFile, Vault } from 'obsidian'
+import { normalizePath, Platform, TFile, Vault } from 'obsidian'
 import { ensureParentDirectory } from './adapter-io'
+import { atomicReplaceContent } from './atomic-replace'
+
+/**
+ * Reject explicit `..` path segments. Obsidian's `normalizePath` behaviour is
+ * not guaranteed to resolve dot segments (and the test mock does not), so a
+ * hidden-directory route such as `.agents/../../x` could otherwise escape the
+ * vault root through the raw adapter. Callers must pass vault-relative paths.
+ */
+export function assertNoLocalPathTraversal(path: string) {
+	if (path.split(/[\\/]+/).some((segment) => segment === '..')) {
+		throw new Error(`Path traversal is not allowed: ${path}`)
+	}
+}
 
 function isAdapterPathNormalized(vault: Vault, normalizedPath: string) {
+	assertNoLocalPathTraversal(normalizedPath)
 	const pathForCheck = normalizedPath.replace(/^\/+/, '').replace(/\/+$/, '')
 	const configDir = normalizePath(vault.configDir)
 		.replace(/^\/+/, '')
@@ -21,15 +35,18 @@ function isAdapterPathNormalized(vault: Vault, normalizedPath: string) {
 }
 
 export function isAdapterPath(vault: Vault, path: string) {
+	assertNoLocalPathTraversal(path)
 	return isAdapterPathNormalized(vault, normalizePath(path))
 }
 
 export async function existsLocalPath(vault: Vault, path: string) {
+	assertNoLocalPathTraversal(path)
 	const normalizedPath = normalizePath(path)
 	return await vault.adapter.exists(normalizedPath)
 }
 
 export async function readLocalBinary(vault: Vault, path: string) {
+	assertNoLocalPathTraversal(path)
 	const normalizedPath = normalizePath(path)
 	if (isAdapterPathNormalized(vault, normalizedPath)) {
 		return await vault.adapter.readBinary(normalizedPath)
@@ -49,6 +66,7 @@ export async function writeLocalBinary(
 	path: string,
 	data: ArrayBuffer,
 ) {
+	assertNoLocalPathTraversal(path)
 	const normalizedPath = normalizePath(path)
 	if (isAdapterPathNormalized(vault, normalizedPath)) {
 		await ensureParentDirectory(vault.adapter, normalizedPath)
@@ -68,6 +86,7 @@ export async function writeLocalBinary(
 }
 
 export async function writeLocalText(vault: Vault, path: string, data: string) {
+	assertNoLocalPathTraversal(path)
 	const normalizedPath = normalizePath(path)
 	if (isAdapterPathNormalized(vault, normalizedPath)) {
 		await ensureParentDirectory(vault.adapter, normalizedPath)
@@ -87,6 +106,7 @@ export async function writeLocalText(vault: Vault, path: string, data: string) {
 }
 
 export async function readLocalText(vault: Vault, path: string) {
+	assertNoLocalPathTraversal(path)
 	const normalizedPath = normalizePath(path)
 	if (isAdapterPathNormalized(vault, normalizedPath)) {
 		return await vault.adapter.read(normalizedPath)
@@ -109,6 +129,9 @@ export async function readLocalText(vault: Vault, path: string) {
  * valid strategy here. Instead we rely on `adapter.write`, which on
  * FileSystemAdapter (desktop) is already atomic internally (writes a temp
  * sibling then renames over the target) and auto-creates parent folders.
+ *
+ * On mobile the adapter write is not guaranteed atomic, so hidden/adapter
+ * paths go through `atomicReplaceContent` (write temp, then backup+rename).
  * Visible vault files fall through to the standard vault write path.
  */
 export async function writeLocalTextAtomic(
@@ -116,7 +139,13 @@ export async function writeLocalTextAtomic(
 	path: string,
 	data: string,
 ) {
-	await writeLocalText(vault, normalizePath(path), data)
+	assertNoLocalPathTraversal(path)
+	const normalizedPath = normalizePath(path)
+	if (Platform.isMobileApp && isAdapterPathNormalized(vault, normalizedPath)) {
+		await atomicReplaceContent(vault, normalizedPath, data, 'text')
+		return
+	}
+	await writeLocalText(vault, normalizedPath, data)
 }
 
 export async function removeLocalPath(
@@ -124,6 +153,7 @@ export async function removeLocalPath(
 	path: string,
 	recursive = false,
 ) {
+	assertNoLocalPathTraversal(path)
 	const normalizedPath = normalizePath(path)
 	if (isAdapterPathNormalized(vault, normalizedPath)) {
 		const stat = await vault.adapter.stat(normalizedPath)

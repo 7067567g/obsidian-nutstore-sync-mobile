@@ -39,5 +39,6 @@
 		"**/*.js",
 		"**/*.mjs",
 		"**/*.cjs"
-	]
+	],
+	"exclude": ["node_modules", "dist", "release", "main.js", "styles.css"]
 }

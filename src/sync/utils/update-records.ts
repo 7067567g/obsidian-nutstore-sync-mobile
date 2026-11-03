@@ -9,15 +9,16 @@ import { SyncRecord } from '~/storage/sync-record'
 import type { SyncLogger } from '~/sync/log'
 import MkdirsRemoteTask from '~/sync/tasks/mkdirs-remote.task'
 import type { BaseTask, TaskResult } from '~/sync/tasks/task.interface'
-import { isMergeablePath } from '~/sync/utils/is-mergeable-path'
+import { isMergeablePath } from './is-mergeable-path'
 import { getDBKey } from '~/utils/get-db-key'
 import { isSub } from '~/utils/is-sub'
 import { readLocalBinary } from '~/utils/local-vault-io'
+import { getNutstoreDavEndpoint } from '~/utils/nutstore-endpoints'
 import { statVaultItem } from '~/utils/stat-vault-item'
 import { stdRemotePath } from '~/utils/std-remote-path'
 import { hashArrayBuffer } from '~/sync/conflict-content-hash'
-import type NutstorePlugin from '../..'
-import RemoveRemoteRecursivelyTask from '../tasks/remove-remote-recursively.task'
+import type NutstorePlugin from '~/index'
+import RemoveRemoteRecursivelyTask from '~/sync/tasks/remove-remote-recursively.task'
 
 export interface UpdateMtimeProgress {
 	total: number
@@ -62,11 +63,12 @@ export async function updateMtimeInRecord(
 	}
 
 	const token = await plugin.getToken()
+	const remoteAccountId = await plugin.getRemoteAccountId()
 	const remoteFs = new NutstoreFileSystem({
 		settings: plugin.settings,
 		vault,
 		token,
-		remoteAccountId: await plugin.getRemoteAccountId(),
+		remoteAccountId,
 		remoteBaseDir: stdRemotePath(remoteBaseDir),
 	})
 
@@ -75,7 +77,12 @@ export async function updateMtimeInRecord(
 		latestRemoteEntities.map((e) => [e.stat.path, e]),
 	)
 	const syncRecord = new SyncRecord(
-		getDBKey(vault.getName(), remoteBaseDir),
+		getDBKey(
+			vault.getName(),
+			remoteBaseDir,
+			remoteAccountId,
+			getNutstoreDavEndpoint(plugin.settings),
+		),
 		syncRecordKV,
 	)
 	const records = await syncRecord.getRecords()

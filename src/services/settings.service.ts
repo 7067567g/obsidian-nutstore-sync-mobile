@@ -15,11 +15,12 @@ import {
 	type NutstoreLocalSettings,
 	type NutstoreSettings,
 } from '~/settings'
+import { normalizeRetentionPolicy } from '~/ai/chat/session/retention-policy'
 import { ConflictStrategy } from '~/sync/tasks/conflict-resolve.task'
 import { DEFAULT_MOBILE_APP_DOWNLOAD_FILE_CHUNK_SIZE } from '~/utils/download-chunk-size'
 import { migrateLegacyFilterRules } from '~/utils/glob-match'
 import logger from '~/utils/logger'
-import type NutstorePlugin from '..'
+import type NutstorePlugin from '~/index'
 import { BaseService } from './service.interface'
 
 export default class SettingsService extends BaseService {
@@ -50,6 +51,11 @@ export default class SettingsService extends BaseService {
 				? (loadedSettings as Partial<NutstoreSettings>)
 				: {}
 		this.plugin.settings = Object.assign({}, DEFAULT_SETTINGS, storedSettings)
+		// #102: stored data may predate `retention` or carry a partial map; keep
+		// the conservative defaults for every missing/invalid field.
+		this.plugin.settings.retention = normalizeRetentionPolicy(
+			this.plugin.settings.retention,
+		)
 		if (
 			storedSettings?.conflictStrategy !== undefined &&
 			!Object.values(ConflictStrategy).includes(storedSettings.conflictStrategy)

@@ -1,103 +1,63 @@
 import { Notice } from 'obsidian'
 import type { ChatSession, LegacyChatSession } from '~/ai/chat/domain'
-
-import { ChatSessionIndexItem } from '~/ai/chat/domain'
 import { deriveTitle } from '~/ai/chat/messages/message-utils'
-import type { ChatState } from '~/ai/chat/runtime/chat-state'
-import type { Selection } from '~/ai/chat/runtime/selection'
-import type { ChatMetaRecord } from '~/storage'
 import {
 	SessionFileCorruptError,
-	SessionsFileBackend,
+	type SessionsFileBackend,
 	getChatSessionPath,
-	type ChatMetaFile,
 	type ChatSessionFilePayload,
-} from '~/ai/chat/session/session-files'
-import { perfMetrics, perfNow } from '~/diagnostics/perf-metrics'
-import i18n from '~/i18n'
+} from './session-files'
+import type { OpsGcOptions } from './ops-gc'
 import {
 	decodeChatSessionFromStorage,
-	encodeChatSessionForStorage,
 	type PersistedChatSession,
-} from '~/ai/chat/session/session-persistence'
-import {
-	migrateChatSession,
-	normalizeLegacySession,
-} from '~/ai/chat/session/session-migration'
-import type { ChatAgentState, ReversibleToolOp } from '~/ai/chat/types'
-import { normalizeReversibleToolOpRecord } from '~/ai/chat/messages/reversible-op-utils'
-import { MASTER_AGENT_ID } from '~/ai/chat/agents/registry'
-import { normalizeRehydratedExecution } from '~/ai/chat/session/rehydration-execution'
-import { SessionRecovery } from '~/ai/chat/session/session-recovery'
-import { SessionWriteQueue } from '~/ai/chat/session/session-write-queue'
+} from './session-persistence'
+import i18n from '~/i18n'
 import logger from '~/utils/logger'
+import { SessionStoreIndexBase } from './session-store-index'
+import { SessionUnavailableError } from './session-store-base'
+import { SessionLogCorruptionError } from './session-log-parse'
+
+export { SessionUnavailableError }
+export type { SessionLegacyStore } from './session-store-base'
 
 /**
- * Optional access to the legacy IndexedDB-backed session storage. Used once to
- * migrate existing sessions into vault JSON files and as a read fallback for
- * sessions whose file is not present on disk. Kept behind an interface so the
- * store stays testable without a live IndexedDB.
+ * Optional persistence-backend capability (H4 / K15). It returns a cheap,
+ * comparable token for the currently persisted session payload — e.g. a
+ * `mtime+size` pair or the log generation. When present, the in-memory session
+ * cache is revalidated before every cache hit so external rewrites (Nutstore
+ * sync, another window, compaction) are picked up without re-decoding on every
+ * switch. Backends that do not implement it keep today's behaviour: the cached
+ * object stays authoritative until `invalidateSession` is called.
  */
-export interface SessionLegacyStore {
-	listSessionKeys(): Promise<string[]>
-	getSession(id: string): Promise<unknown>
-	unsetSession(id: string): Promise<void>
-	getMeta(): Promise<{
-		meta: ChatMetaRecord | null
-		index: ChatSessionIndexItem[]
-	}>
+export interface SessionCacheVersionSource {
+	getSessionFileVersion(sessionId: string): Promise<string | number | undefined>
 }
 
-interface LegacyMigrationResult {
-	meta: ChatMetaRecord | null
-	index: ChatSessionIndexItem[]
-	migrated: boolean
+function hasSessionCacheVersion(
+	backend: SessionsFileBackend,
+): backend is SessionsFileBackend & SessionCacheVersionSource {
+	return (
+		typeof (
+			backend as unknown as {
+				getSessionFileVersion?: unknown
+			}
+		).getSessionFileVersion === 'function'
+	)
 }
 
-export class SessionUnavailableError extends Error {
-	constructor(
-		public readonly sessionId: string,
-		options?: { cause?: unknown },
-	) {
-		super(i18n.t('chatbox.errors.sessionNotFound'), options)
-		this.name = 'SessionUnavailableError'
-	}
-}
+export class SessionStore extends SessionStoreIndexBase {
+	/** In-flight loads keyed by session id, so concurrent misses share one read (WS2-N1). */
+	private readonly loadingSessions = new Map<string, Promise<ChatSession>>()
+	/** Version token captured when a session was cached, compared on cache hit (H4). */
+	private readonly loadedSessionVersions = new Map<string, string | number>()
+	/**
+	 * Bumped on `invalidateSession`; a read that started before the bump returns
+	 * its value but must not repopulate the cache with pre-invalidation data.
+	 */
+	private readonly sessionEpochs = new Map<string, number>()
 
-export class SessionStore {
-	private writeQueues = new Map<string, SessionWriteQueue>()
-
-	constructor(
-		private state: ChatState,
-		private selection: Selection,
-		private backend: SessionsFileBackend,
-		private legacy: SessionLegacyStore,
-		private recovery: SessionRecovery | undefined,
-		private resetSessionExecution: (
-			sessionId: string,
-			session: ChatSession,
-		) => void = () => {},
-	) {}
-
-	async loadSessionIndex() {
-		const legacyMigration = await this.ensureMigratedFromLegacy()
-		const diskIds = new Set(await this.backend.listSessionIds())
-		const meta = await this.backend.readMetaFile()
-		const cachedIndex = legacyMigration?.migrated
-			? null
-			: buildSessionIndexFromMeta(meta, diskIds)
-		if (cachedIndex) {
-			this.state.sessionIndex = cachedIndex
-			this.state.activeSessionId =
-				meta?.activeSessionId && diskIds.has(meta.activeSessionId)
-					? meta.activeSessionId
-					: cachedIndex[0]?.id
-			return
-		}
-		await this.reconcileSessionIndex(legacyMigration, { diskIds, meta })
-	}
-
-	async collectOperationGcReport(options?: { deleteOrphans?: boolean }) {
+	async collectOperationGcReport(options?: OpsGcOptions) {
 		return this.backend.collectOperationGcReport(options)
 	}
 
@@ -107,6 +67,9 @@ export class SessionStore {
 		await this.recovery.recoverPending(async (id) => {
 			await this.backend.readSessionFile(id, { hydrateOperations: false })
 			this.state.deletedSessionIds.delete(id)
+			// H4: recovery applies on-disk state written out-of-band (crash temp
+			// promote), so any cached copy of this session is stale by definition.
+			this.invalidateSession(id)
 		})
 	}
 
@@ -118,7 +81,11 @@ export class SessionStore {
 		try {
 			return await this.loadSessionById(activeSessionId)
 		} catch (error) {
-			if (!(error instanceof SessionUnavailableError)) throw error
+			// N3: a transient read failure is not a missing session; do not
+			// reconcile (and therefore trim) the index for it.
+			if (!(error instanceof SessionUnavailableError) || error.transient) {
+				throw error
+			}
 		}
 
 		await this.reconcileSessionIndex(null)
@@ -127,125 +94,14 @@ export class SessionStore {
 		return this.loadSessionById(fallbackSessionId)
 	}
 
-	/** Incrementally migrates IndexedDB sessions missing from vault storage. */
-	private async ensureMigratedFromLegacy(): Promise<LegacyMigrationResult | null> {
-		let keys: string[]
-		try {
-			keys = await this.legacy.listSessionKeys()
-		} catch {
-			return null
-		}
-		if (keys.length === 0) {
-			return null
-		}
-		let meta = {
-			meta: null as ChatMetaRecord | null,
-			index: [] as ChatSessionIndexItem[],
-		}
-		try {
-			meta = await this.legacy.getMeta()
-		} catch {
-			/* keep defaults */
-		}
-		const diskIds = new Set(await this.backend.listSessionIds())
-		let migrated = false
-		for (const key of keys) {
-			if (diskIds.has(key)) {
-				continue
-			}
-			let stored: unknown
-			try {
-				stored = await this.legacy.getSession(key)
-			} catch {
-				stored = undefined
-			}
-			if (!stored || typeof stored !== 'object') {
-				continue
-			}
-			try {
-				const decoded = decodeChatSessionFromStorage(
-					stored as PersistedChatSession,
-				)
-				const { session } = this.rehydrateSession(decoded)
-				const snapshot = await encodeChatSessionForStorage(session)
-				const item = meta.index.find((entry) => entry.id === key)
-				await this.backend.writeSessionFile(key, {
-					session: snapshot,
-					title: item?.title,
-				})
-				migrated = true
-			} catch (error) {
-				logger.warn(`Failed to migrate chat session ${key}, skipping it`, error)
-			}
-		}
-		return { ...meta, migrated }
-	}
-
-	private async reconcileSessionIndex(
-		legacyMigration: LegacyMigrationResult | null,
-		known?: {
-			diskIds: Set<string>
-			meta: ChatMetaFile | null
-		},
-	) {
-		const diskIds =
-			known?.diskIds ?? new Set(await this.backend.listSessionIds())
-		const meta = known?.meta ?? (await this.backend.readMetaFile())
-		const validItems = new Map<string, ChatSessionIndexItem>()
-		for (const id of diskIds) {
-			try {
-				const payload = await this.backend.readSessionFile(id, {
-					hydrateOperations: false,
-				})
-				const stored = decodeChatSessionFromStorage(payload.session)
-				const { session } = this.rehydrateSession(stored)
-				const cached = meta?.sessions?.[id]
-				validItems.set(id, {
-					id,
-					title: payload.title || cached?.title || i18n.t('chatbox.newChat'),
-					createdAt: cached?.createdAt ?? numberOrZero(session.createdAt),
-					updatedAt: cached?.updatedAt ?? numberOrZero(session.updatedAt),
-				})
-			} catch {
-				/* skip corrupt session files */
-			}
-		}
-
-		const legacyOrder =
-			legacyMigration?.meta?.orderedSessionIds ??
-			legacyMigration?.index.map((item) => item.id) ??
-			[]
-		const preferredOrders =
-			legacyMigration?.migrated || !meta
-				? [legacyOrder, meta?.orderedSessionIds ?? []]
-				: [meta.orderedSessionIds, legacyOrder]
-		const items: ChatSessionIndexItem[] = []
-		const indexedIds = new Set<string>()
-		for (const id of [...preferredOrders.flat(), ...diskIds]) {
-			const item = validItems.get(id)
-			if (!item || indexedIds.has(id)) {
-				continue
-			}
-			items.push(item)
-			indexedIds.add(id)
-		}
-
-		this.state.sessionIndex = items
-		const preferredActive =
-			legacyMigration?.migrated || !meta
-				? [legacyMigration?.meta?.activeSessionId, meta?.activeSessionId]
-				: [meta.activeSessionId, legacyMigration?.meta?.activeSessionId]
-		this.state.activeSessionId =
-			preferredActive.find((id): id is string => !!id && validItems.has(id)) ??
-			items[0]?.id
-		await this.persistMetaAndIndex()
-	}
-
 	async loadSessionById(sessionId: string) {
 		try {
 			return await this.loadSessionByIdUnchecked(sessionId)
 		} catch (error) {
 			if (!(error instanceof SessionUnavailableError)) throw error
+			// N3: only a genuinely unavailable (file gone/corrupt) session may
+			// trigger an index reconcile; a transient read failure keeps the index.
+			if (error.transient) throw error
 			try {
 				await this.reconcileSessionIndex(null)
 			} catch (reconcileError) {
@@ -258,11 +114,97 @@ export class SessionStore {
 		}
 	}
 
+	/**
+	 * Drop a cached session so the next `loadSessionById` re-reads it from the
+	 * persistence backend. Returns whether a cached entry was removed. Call this
+	 * from external-write paths (sync pull, import, second window) that bypass
+	 * this store's write queue (H4).
+	 */
+	invalidateSession(sessionId: string): boolean {
+		this.sessionEpochs.set(sessionId, this.getSessionEpoch(sessionId) + 1)
+		this.loadingSessions.delete(sessionId)
+		this.loadedSessionVersions.delete(sessionId)
+		// R2b / S2: the JSONL write path has its own TTL-bounded state cache;
+		// an explicit external-write invalidation must clear it too.
+		this.backend.invalidateSessionState(sessionId)
+		return this.state.loadedSessions.delete(sessionId)
+	}
+
+	/** Drop every cached session, e.g. after an external bulk sync (H4). */
+	invalidateAllSessions(): void {
+		for (const sessionId of this.state.loadedSessions.keys()) {
+			this.sessionEpochs.set(sessionId, this.getSessionEpoch(sessionId) + 1)
+			this.backend.invalidateSessionState(sessionId)
+		}
+		this.loadingSessions.clear()
+		this.loadedSessionVersions.clear()
+		this.state.loadedSessions.clear()
+	}
+
+	private getSessionEpoch(sessionId: string) {
+		return this.sessionEpochs.get(sessionId) ?? 0
+	}
+
 	private async loadSessionByIdUnchecked(sessionId: string) {
 		const cached = this.state.loadedSessions.get(sessionId)
 		if (cached) {
-			return cached
+			if (await this.isCachedSessionFresh(sessionId)) {
+				return cached
+			}
+			this.state.loadedSessions.delete(sessionId)
+			this.loadedSessionVersions.delete(sessionId)
 		}
+
+		// Coalesce concurrent misses for the same session onto one read so the
+		// store and every caller share a single instance (WS2-N1).
+		const pending = this.loadingSessions.get(sessionId)
+		if (pending) {
+			return pending
+		}
+
+		const load = this.readSessionIntoCache(sessionId)
+		this.loadingSessions.set(sessionId, load)
+		try {
+			return await load
+		} finally {
+			if (this.loadingSessions.get(sessionId) === load) {
+				this.loadingSessions.delete(sessionId)
+			}
+		}
+	}
+
+	private async isCachedSessionFresh(sessionId: string) {
+		if (!hasSessionCacheVersion(this.backend)) {
+			return true
+		}
+		const version = await this.readSessionVersion(sessionId)
+		return (
+			version === undefined ||
+			this.loadedSessionVersions.get(sessionId) === version
+		)
+	}
+
+	private async readSessionVersion(
+		sessionId: string,
+	): Promise<string | number | undefined> {
+		const backend = this.backend
+		if (!hasSessionCacheVersion(backend)) {
+			return undefined
+		}
+		try {
+			return await backend.getSessionFileVersion(sessionId)
+		} catch (error) {
+			logger.warn(`Failed to read chat session version for ${sessionId}`, error)
+			return undefined
+		}
+	}
+
+	private async readSessionIntoCache(sessionId: string) {
+		const epoch = this.getSessionEpoch(sessionId)
+		// Read the version before the payload: if the file changes between the
+		// two, the stored token is older than the content, so the next hit
+		// revalidates instead of trusting a mismatched pair.
+		const version = await this.readSessionVersion(sessionId)
 
 		let payload: ChatSessionFilePayload | undefined
 		try {
@@ -278,6 +220,24 @@ export class SessionStore {
 				throw new SessionUnavailableError(sessionId, {
 					cause: error,
 				})
+			}
+			// N3: a non-corruption read failure is only "the session is gone"
+			// when the file is really absent. If it still exists, this is a
+			// transient I/O/sync failure and must not be downgraded to a
+			// full-index reconcile (which would drop the session from the list).
+			if (!(error instanceof SessionLogCorruptionError)) {
+				let stillOnDisk = false
+				try {
+					stillOnDisk = await this.backend.hasSessionFile(sessionId)
+				} catch {
+					/* treat an existence probe failure as "not present" */
+				}
+				if (stillOnDisk) {
+					throw new SessionUnavailableError(sessionId, {
+						cause: error,
+						transient: true,
+					})
+				}
 			}
 			payload = undefined
 		}
@@ -312,8 +272,17 @@ export class SessionStore {
 		}
 
 		const { session, changed } = this.rehydrateSession(stored)
+		if (epoch !== this.getSessionEpoch(sessionId)) {
+			// Invalidated while this read was in flight: hand the caller the
+			// decoded value but leave the cache cold, so the next caller re-reads
+			// instead of trusting this possibly pre-invalidation copy.
+			return session
+		}
 		this.resetSessionExecution(sessionId, session)
 		this.state.loadedSessions.set(sessionId, session)
+		if (version !== undefined) {
+			this.loadedSessionVersions.set(sessionId, version)
+		}
 
 		const existing = this.state.sessionIndex.find(
 			(item) => item.id === sessionId,
@@ -333,129 +302,6 @@ export class SessionStore {
 		return session
 	}
 
-	private getWriteQueue(sessionId: string) {
-		let queue = this.writeQueues.get(sessionId)
-		if (!queue) {
-			queue = new SessionWriteQueue(async (task) => {
-				if (this.state.deletedSessionIds.has(sessionId) || !task.isCurrent()) {
-					return
-				}
-				const encodeStartedAt = perfNow()
-				const snapshot = await encodeChatSessionForStorage(task.session)
-				perfMetrics.recordPersistenceEncode(perfNow() - encodeStartedAt)
-				if (this.state.deletedSessionIds.has(sessionId) || !task.isCurrent()) {
-					return
-				}
-				await this.recovery?.markStarted(sessionId)
-				await this.backend.writeSessionFile(
-					sessionId,
-					{
-						session: snapshot,
-						title: task.title,
-					},
-					task.session,
-				)
-				await this.recovery?.markCompleted(sessionId)
-			})
-			this.writeQueues.set(sessionId, queue)
-		}
-		return queue
-	}
-
-	async persistSession(
-		session: ChatSession,
-		isCurrent: () => boolean = () =>
-			this.state.loadedSessions.get(session.id) === session,
-	) {
-		if (this.state.deletedSessionIds.has(session.id) || !isCurrent()) {
-			return
-		}
-		const startedAt = perfNow()
-		try {
-			const queue = this.getWriteQueue(session.id)
-			const promise = queue.schedule({
-				session,
-				title: this.getIndexedTitle(session),
-				isCurrent,
-			})
-			void promise.catch((error) => {
-				logger.error('Failed to persist chat session', error)
-			})
-			// Awaited persists are durability points, so flush immediately. This also
-			// drains any fire-and-forget batch already queued for this session.
-			await queue.flush()
-		} finally {
-			perfMetrics.recordPersistence(perfNow() - startedAt)
-		}
-	}
-
-	/**
-	 * Queue a write-behind persist for callers that do not await persistence
-	 * (selection changes, queued-message bookkeeping). The fixed window coalesces
-	 * bursts into one write; `flushSession`/`flushAll` are the durability barriers.
-	 */
-	persistSessionSoon(
-		session: ChatSession,
-		isCurrent: () => boolean = () =>
-			this.state.loadedSessions.get(session.id) === session,
-	) {
-		if (this.state.deletedSessionIds.has(session.id) || !isCurrent()) {
-			return
-		}
-		const promise = this.getWriteQueue(session.id).schedule({
-			session,
-			title: this.getIndexedTitle(session),
-			isCurrent,
-		})
-		void promise.catch((error) => {
-			logger.error('Failed to persist chat session', error)
-		})
-	}
-
-	/** Force one session's pending write-behind batch to disk. */
-	async flushSession(sessionId: string) {
-		const queue = this.writeQueues.get(sessionId)
-		if (!queue) return
-		const startedAt = perfNow()
-		try {
-			await queue.flush()
-		} finally {
-			perfMetrics.recordPersistence(perfNow() - startedAt)
-		}
-	}
-
-	/** Flush every session's pending write-behind batch, aggregating failures. */
-	async flushAll() {
-		const results = await Promise.allSettled(
-			[...this.writeQueues.keys()].map((sessionId) =>
-				this.flushSession(sessionId),
-			),
-		)
-		const errors: unknown[] = results.flatMap((result) =>
-			result.status === 'rejected' ? [result.reason as unknown] : [],
-		)
-		if (errors.length > 0) {
-			throw new AggregateError(errors, 'Failed to flush chat sessions')
-		}
-	}
-
-	async persistMetaAndIndex() {
-		const sessions: ChatMetaFile['sessions'] = {}
-		for (const item of this.state.sessionIndex) {
-			sessions[item.id] = {
-				title: item.title,
-				createdAt: item.createdAt,
-				updatedAt: item.updatedAt,
-			}
-		}
-		const meta: ChatMetaFile = {
-			activeSessionId: this.state.activeSessionId,
-			orderedSessionIds: this.state.sessionIndex.map((item) => item.id),
-			sessions,
-		}
-		await this.backend.writeMetaFile(meta)
-	}
-
 	async deleteSession(sessionId: string) {
 		const queue = this.writeQueues.get(sessionId)
 		if (queue) {
@@ -463,12 +309,23 @@ export class SessionStore {
 				logger.error('Failed to flush chat session before delete', error)
 			})
 		}
+		this.loadingSessions.delete(sessionId)
+		this.loadedSessionVersions.delete(sessionId)
+		// N2: mark the id deleted for the duration of the backend delete so
+		// concurrent persists cannot resurrect the file. If the delete fails the
+		// mark must be rolled back, otherwise every later persist for this session
+		// is silently suppressed until the plugin reloads.
 		this.state.deletedSessionIds.add(sessionId)
-		if (queue) {
-			await queue.dispose()
-			this.writeQueues.delete(sessionId)
+		try {
+			if (queue) {
+				await queue.dispose()
+				this.writeQueues.delete(sessionId)
+			}
+			await this.backend.deleteSessionFile(sessionId)
+		} catch (error) {
+			this.state.deletedSessionIds.delete(sessionId)
+			throw error
 		}
-		await this.backend.deleteSessionFile(sessionId)
 		await this.recovery?.markCompleted(sessionId)
 		try {
 			await this.legacy.unsetSession(sessionId)
@@ -476,233 +333,4 @@ export class SessionStore {
 			/* best-effort legacy cleanup */
 		}
 	}
-
-	private getIndexedTitle(session: ChatSession): string | undefined {
-		const title = this.state.sessionIndex.find(
-			(item) => item.id === session.id,
-		)?.title
-		if (title && title !== i18n.t('chatbox.newChat')) {
-			return title
-		}
-		return undefined
-	}
-
-	rehydrateSession(session: ChatSession | LegacyChatSession) {
-		const migrated = migrateChatSession(
-			'schemaVersion' in session ? session : normalizeLegacySession(session),
-		)
-		const { session: rehydrated, changed: opsRewritten } =
-			this.normalizeSession(migrated.session)
-		let changed =
-			migrated.changed ||
-			this.selection.sanitizeSessionSelection(rehydrated) ||
-			opsRewritten
-
-		changed = normalizeRehydratedExecution(rehydrated) || changed
-
-		return {
-			session: rehydrated,
-			changed,
-		}
-	}
-
-	normalizeSession(session: ChatSession): {
-		session: ChatSession
-		changed: boolean
-	} {
-		let changed = false
-		const normalizeMessage = (message: ChatAgentState['timeline'][number]) => ({
-			...message,
-			metadata: message.metadata
-				? {
-						...message.metadata,
-						llm: message.metadata.llm ? { ...message.metadata.llm } : undefined,
-					}
-				: { createdAt: session.createdAt },
-			parts: [...message.parts],
-		})
-		const normalizeAgent = (agent: ChatAgentState): ChatAgentState => {
-			const normalizeTimestamp = (value: unknown) =>
-				typeof value === 'number' && Number.isFinite(value) ? value : undefined
-			const subagents = Object.fromEntries(
-				Object.entries(agent.subagents ?? {}).map(([id, child]) => [
-					id,
-					normalizeAgent(child),
-				]),
-			)
-			const normalizeOperations = (operations: ReversibleToolOp[]) => {
-				const normalized: ReversibleToolOp[] = []
-				for (const operation of operations) {
-					const canonical = normalizeReversibleToolOpRecord(operation)
-					if (!canonical) {
-						changed = true
-						continue
-					}
-					if (canonical.vaultPath !== operation.vaultPath) {
-						changed = true
-					}
-					normalized.push(canonical)
-				}
-				return normalized
-			}
-			const storedPendingInputs = Array.isArray(agent.pendingInputs)
-				? agent.pendingInputs
-				: []
-			const pendingInputs =
-				agent.id === MASTER_AGENT_ID
-					? // Master continuation is runtime-only now; do not revive persisted
-						// execution input after reload.
-						[]
-					: storedPendingInputs.map(normalizeMessage)
-			const timeline = Array.isArray(agent.timeline)
-				? agent.timeline.map(normalizeMessage)
-				: []
-			const model =
-				agent.model &&
-				typeof agent.model.providerId === 'string' &&
-				typeof agent.model.modelId === 'string'
-					? {
-							providerId: agent.model.providerId,
-							modelId: agent.model.modelId,
-						}
-					: undefined
-			if (agent.id === MASTER_AGENT_ID && storedPendingInputs.length > 0) {
-				changed = true
-			}
-			if (agent.model !== undefined && !model) changed = true
-			return {
-				id: agent.id,
-				type:
-					agent.type ||
-					(agent.id === MASTER_AGENT_ID ? MASTER_AGENT_ID : 'subagent'),
-				model,
-				status: agent.id === MASTER_AGENT_ID ? 'idle' : agent.status,
-				createdAt: agent.createdAt || session.createdAt,
-				startedAt: normalizeTimestamp(agent.startedAt),
-				finishedAt: normalizeTimestamp(agent.finishedAt),
-				resultPath:
-					typeof agent.resultPath === 'string' ? agent.resultPath : undefined,
-				timeline,
-				pendingInputs,
-				operations: Object.fromEntries(
-					Object.entries(agent.operations ?? {}).map(
-						([messageId, operations]) => [
-							messageId,
-							normalizeOperations(operations ?? []),
-						],
-					),
-				),
-				toolTimings: Object.fromEntries(
-					Object.entries(agent.toolTimings ?? {}).flatMap(
-						([toolCallId, timing]) => {
-							const startedAt = normalizeTimestamp(timing?.startedAt)
-							if (startedAt === undefined) return []
-							const finishedAt = normalizeTimestamp(timing.finishedAt)
-							const outcome =
-								typeof timing?.outcome === 'string' ? timing.outcome : undefined
-							return [
-								[
-									toolCallId,
-									{
-										startedAt,
-										...(finishedAt === undefined ? {} : { finishedAt }),
-										...(outcome ? { outcome } : {}),
-									},
-								],
-							]
-						},
-					),
-				),
-				readVaultPaths: Array.isArray(agent.readVaultPaths)
-					? agent.readVaultPaths.filter((path) => typeof path === 'string')
-					: undefined,
-				subagents,
-			}
-		}
-		const master = normalizeAgent(session.subagents.master)
-		return {
-			session: {
-				schemaVersion: 2,
-				id: session.id,
-				createdAt: session.createdAt,
-				updatedAt: session.updatedAt || session.createdAt,
-				model: session.model ? { ...session.model } : undefined,
-				systemPrompt: session.systemPrompt,
-				disabledMcpServers: Array.isArray(session.disabledMcpServers)
-					? session.disabledMcpServers.filter(
-							(name): name is string => typeof name === 'string',
-						)
-					: undefined,
-				subagents: { master },
-			},
-			changed,
-		}
-	}
-
-	upsertSessionIndexItem(
-		session: ChatSession,
-		title?: string,
-		prepend = false,
-	) {
-		if (this.state.deletedSessionIds.has(session.id)) {
-			return
-		}
-		const existingTitle =
-			this.state.sessionIndex.find((e) => e.id === session.id)?.title ??
-			i18n.t('chatbox.newChat')
-		const item: ChatSessionIndexItem = {
-			id: session.id,
-			title: title ?? existingTitle,
-			createdAt: session.createdAt,
-			updatedAt: session.updatedAt,
-		}
-		const existingIndex = this.state.sessionIndex.findIndex(
-			(entry) => entry.id === session.id,
-		)
-		if (existingIndex === -1) {
-			this.state.sessionIndex = prepend
-				? [item, ...this.state.sessionIndex]
-				: [...this.state.sessionIndex, item]
-			return
-		}
-
-		const nextIndex = this.state.sessionIndex.slice()
-		nextIndex[existingIndex] = item
-		if (prepend && existingIndex > 0) {
-			nextIndex.splice(existingIndex, 1)
-			nextIndex.unshift(item)
-		}
-		this.state.sessionIndex = nextIndex
-	}
-}
-
-function numberOrZero(value: unknown): number {
-	return typeof value === 'number' && Number.isFinite(value) ? value : 0
-}
-
-function buildSessionIndexFromMeta(
-	meta: ChatMetaFile | null,
-	diskIds: Set<string>,
-): ChatSessionIndexItem[] | null {
-	if (!meta || meta.orderedSessionIds.length !== diskIds.size) return null
-
-	const indexedIds = new Set<string>()
-	const items: ChatSessionIndexItem[] = []
-	for (const id of meta.orderedSessionIds) {
-		const info = meta.sessions[id]
-		if (
-			!diskIds.has(id) ||
-			indexedIds.has(id) ||
-			!info ||
-			typeof info.title !== 'string' ||
-			!Number.isFinite(info.createdAt) ||
-			!Number.isFinite(info.updatedAt)
-		) {
-			return null
-		}
-		indexedIds.add(id)
-		items.push({ id, ...info })
-	}
-
-	return Object.keys(meta.sessions).length === diskIds.size ? items : null
 }

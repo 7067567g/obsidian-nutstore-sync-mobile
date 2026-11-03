@@ -1,7 +1,7 @@
 import type { FilePart, ModelMessage, UserModelMessage } from 'ai'
 import i18n from '~/i18n'
 import type { ChatSession } from '~/ai/chat/domain'
-import { getMessageText } from '~/ai/chat/messages/ui-message'
+import { getMessageText } from './ui-message'
 
 const DEFAULT_IMAGE_MEDIA_TYPE = 'image/png'
 

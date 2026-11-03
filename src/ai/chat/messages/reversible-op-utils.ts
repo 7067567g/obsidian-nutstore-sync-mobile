@@ -1,6 +1,6 @@
 import type { ReversibleToolOp } from '~/ai/chat/types'
 import { LEGACY_VAULT_MOUNT_POINT } from '~/ai/tools/bash/mount-points'
-import { hasCompressedFileContent } from '~/ai/chat/messages/reversible-content'
+import { hasCompressedFileContent } from './reversible-content'
 import { normalizeVaultPath } from '~/utils/normalize-vault-path'
 
 function copyFileSnapshot(

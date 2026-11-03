@@ -3,7 +3,7 @@ import { isSameTime } from '~/utils/is-same-time'
 import type {
 	SyncDecisionInput,
 	SyncRecordItem,
-} from '../decision/sync-decision.interface'
+} from '~/sync/decision/sync-decision.interface'
 
 function remoteTime(stat: StatModel) {
 	return stat.serverMtime ?? stat.mtime

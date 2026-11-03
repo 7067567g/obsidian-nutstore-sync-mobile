@@ -8,7 +8,7 @@ import {
 } from '~/ai/catalog/config'
 import { assertProviderUsable } from '~/ai/core/runtime'
 import type { AIProviderConfig } from '~/ai/core/types'
-import type { ChatState } from '~/ai/chat/runtime/chat-state'
+import type { ChatState } from './chat-state'
 import i18n from '~/i18n'
 import logger from '~/utils/logger'
 import type { NutstoreSettings } from '~/settings'

@@ -1,4 +1,4 @@
-import { createMount, MountController } from '../mount'
+import { createMount, MountController } from '~/components/solid-js/mount'
 import WebDAVExplorer, { WebDAVExplorerProps } from './WebDAVExplorer'
 
 export type WebDAVExplorerController = MountController<WebDAVExplorerProps>

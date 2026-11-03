@@ -5,6 +5,45 @@ import { UNZIP_MAX_DECOMPRESSED_SIZE, archiveCommands } from './zip'
 
 const content = 'English text 与中文内容\nSecond neutral line 第二行\n'
 
+const ZIP_UTF8_FLAG = 0x800
+
+/** 清掉本地头与中央目录里的 UTF-8 标志，模拟"未声明编码"的第三方 zip。 */
+function clearZipUtf8Flag(bytes: Uint8Array) {
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+	let offset = 0
+	while (
+		offset + 30 <= bytes.length &&
+		view.getUint32(offset, true) === 0x04034b50
+	) {
+		view.setUint16(
+			offset + 6,
+			view.getUint16(offset + 6, true) & ~ZIP_UTF8_FLAG,
+			true,
+		)
+		const nameLength = view.getUint16(offset + 26, true)
+		const extraLength = view.getUint16(offset + 28, true)
+		const compressedSize = view.getUint32(offset + 18, true)
+		offset += 30 + nameLength + extraLength + compressedSize
+	}
+	const centralOffset = view.getUint32(bytes.length - 6, true)
+	let central = centralOffset
+	while (
+		central + 46 <= bytes.length &&
+		view.getUint32(central, true) === 0x02014b50
+	) {
+		view.setUint16(
+			central + 8,
+			view.getUint16(central + 8, true) & ~ZIP_UTF8_FLAG,
+			true,
+		)
+		const nameLength = view.getUint16(central + 28, true)
+		const extraLength = view.getUint16(central + 30, true)
+		const commentLength = view.getUint16(central + 32, true)
+		central += 46 + nameLength + extraLength + commentLength
+	}
+	return bytes
+}
+
 function createBash(files: Record<string, string | Uint8Array>) {
 	return new Bash({
 		cwd: '/workspace',
@@ -111,5 +150,45 @@ describe('zip and unzip commands', () => {
 		expect(result).toMatchObject({ exitCode: 1 })
 		expect(result.stderr).toContain('unsafe archive entry')
 		expect(await bash.fs.exists('/workspace/outside.txt')).toBe(false)
+	})
+	it('round-trips a non-ASCII member name written with the UTF-8 flag', async () => {
+		const bash = createBash({
+			'/workspace/docs/中文 名称.txt': content,
+		})
+		await bash.exec('zip -rq cjk.zip docs')
+		const listed = await bash.exec('unzip -l cjk.zip')
+		const piped = await bash.exec('unzip -p cjk.zip "docs/中文 名称.txt"')
+
+		expect(listed.stdout).toContain('docs/中文 名称.txt')
+		expect(piped.stdout).toBe(content)
+	})
+
+	it('decodes a UTF-8 member name even without the UTF-8 flag', async () => {
+		const name = '中文名称.txt'
+		const bytes = clearZipUtf8Flag(
+			zipSync({ [name]: new TextEncoder().encode('no-flag') }),
+		)
+		const bash = createBash({ '/workspace/no-flag.zip': bytes })
+
+		const listed = await bash.exec('unzip -l no-flag.zip')
+		expect(listed.stdout).toContain(name)
+	})
+
+	it('decodes a GBK member name without the UTF-8 flag', async () => {
+		// GBK：中文 = D6 D0 CE C4；先造等长 ASCII 名再替换字节，保持头内偏移不变。
+		const gbkName = new Uint8Array([
+			0xd6, 0xd0, 0xce, 0xc4, 0x2e, 0x74, 0x78, 0x74,
+		])
+		const bytes = zipSync({ 'abcd.txt': new TextEncoder().encode('gbk') })
+		for (let index = 0; index + 8 <= bytes.length; index++) {
+			if (bytes[index] === 0x61) {
+				const ascii = new TextDecoder().decode(bytes.subarray(index, index + 8))
+				if (ascii === 'abcd.txt') bytes.set(gbkName, index)
+			}
+		}
+		const bash = createBash({ '/workspace/gbk.zip': bytes })
+
+		const listed = await bash.exec('unzip -l gbk.zip')
+		expect(listed.stdout).toContain('中文.txt')
 	})
 })

@@ -1,6 +1,6 @@
 import { App, Modal, Setting } from 'obsidian'
 import { addClassTokens, removeClassTokens } from '~/utils/class-tokens'
-import i18n from '../i18n'
+import i18n from '~/i18n'
 import {
 	getConflictStrategyI18nKey,
 	getSyncPolicyDescI18nKey,
@@ -8,7 +8,7 @@ import {
 	SyncPolicy,
 	type NutstoreLocalSettings,
 	type NutstoreSettings,
-} from '../settings'
+} from '~/settings'
 
 export default class SyncConfirmModal extends Modal {
 	private selectedPolicy: SyncPolicy

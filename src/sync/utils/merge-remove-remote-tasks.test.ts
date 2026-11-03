@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import RemoveRemoteTask from '../tasks/remove-remote.task'
+import RemoveRemoteTask from '~/sync/tasks/remove-remote.task'
 import { mergeRemoveRemoteTasks } from './merge-remove-remote-tasks'
 
 function removeRemote(remotePath: string): RemoveRemoteTask {

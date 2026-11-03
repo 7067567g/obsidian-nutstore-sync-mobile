@@ -191,6 +191,95 @@ describe('createPermissionGuard', () => {
 	})
 })
 
+describe('bash permission requests', () => {
+	it('prompts once per bash request unless session-approved', async () => {
+		const { guard } = createGuard('session-1')
+		modalOpenMock
+			.mockResolvedValueOnce('approve')
+			.mockResolvedValueOnce('approve-session')
+			.mockResolvedValueOnce('approve')
+
+		await guard({ type: 'bash', command: 'ls /' })
+		await guard({ type: 'bash', command: 'cat notes/a.md' })
+		await guard({ type: 'bash', command: 'echo again' })
+
+		expect(modalOpenMock).toHaveBeenCalledTimes(2)
+	})
+
+	it('always-allow callback persists the decision', async () => {
+		const autoApproveBySession = new Map<string, Set<string>>()
+		const onAlwaysAllow = vi.fn()
+		const guard = createPermissionGuard(
+			{} as never,
+			getRuntimeStore('session-1', autoApproveBySession),
+			{ onAlwaysAllow },
+		)
+		modalOpenMock.mockResolvedValueOnce('approve-always')
+
+		await guard({ type: 'bash', command: 'echo always' })
+
+		expect(onAlwaysAllow).toHaveBeenCalledWith({
+			type: 'bash',
+			command: 'echo always',
+		})
+	})
+
+	it('denies bash without echoing the command body', async () => {
+		const { guard } = createGuard('session-1')
+		modalOpenMock.mockResolvedValueOnce('deny')
+
+		await expect(
+			guard({ type: 'bash', command: 'rm -rf notes' }),
+		).rejects.toThrow('bash: denied-by-user')
+	})
+
+	it('keeps the purpose in the denial summary when present', async () => {
+		const { guard } = createGuard('session-1')
+		modalOpenMock.mockResolvedValueOnce('deny')
+
+		let denial: unknown
+		try {
+			await guard({
+				type: 'bash',
+				command: 'printf secret-token',
+				purpose: '演示拒绝',
+			})
+		} catch (error) {
+			denial = error
+		}
+		expect(denial).toBeInstanceOf(Error)
+		const message = (denial as Error).message
+		expect(message).toContain('bash: 演示拒绝')
+		expect(message).not.toContain('secret-token')
+		expect(denial).toMatchObject({ code: 'PERMISSION_DENIED' })
+	})
+
+	it('reports the effective authorization source', async () => {
+		const once = createGuard('session-once').guard
+		modalOpenMock.mockResolvedValueOnce('approve')
+		await expect(once({ type: 'bash', command: 'echo once' })).resolves.toBe(
+			'once',
+		)
+
+		const session = createGuard('session-session').guard
+		modalOpenMock.mockResolvedValueOnce('approve-session')
+		await expect(
+			session({ type: 'bash', command: 'echo session' }),
+		).resolves.toBe('session')
+		// Once remembered, later requests in the same session no longer prompt
+		// and keep reporting `session` instead of the configured `ask`.
+		await expect(
+			session({ type: 'bash', command: 'echo again' }),
+		).resolves.toBe('session')
+
+		const always = createGuard('session-always').guard
+		modalOpenMock.mockResolvedValueOnce('approve-always')
+		await expect(
+			always({ type: 'bash', command: 'echo always' }),
+		).resolves.toBe('always')
+	})
+})
+
 describe('createReadonlyPermissionGuard', () => {
 	it('rejects write operations without opening any modal', async () => {
 		const guard = createReadonlyPermissionGuard()
@@ -292,5 +381,42 @@ describe('createFullAccessPermissionGuard', () => {
 				fs: { kind: 'write', paths: ['notes/a.md', 'notes/b.md'] },
 			},
 		})
+	})
+})
+
+describe('withPermissionPurpose without a bound guard (A04)', () => {
+	it('returns a denying guard instead of undefined', async () => {
+		const guard = withPermissionPurpose(undefined, 'neutral purpose')
+
+		expect(guard).toBeDefined()
+		await expect(
+			guard!({ type: 'fs', fs: { kind: 'write', path: 'notes/a.md' } }),
+		).rejects.toThrow('write on notes/a.md')
+		expect(modalOpenMock).not.toHaveBeenCalled()
+	})
+
+	it('denies batch, settings and bash requests with a readable summary', async () => {
+		const guard = withPermissionPurpose(undefined, 'neutral purpose')!
+
+		await expect(
+			guard({
+				type: 'fs',
+				fs: { kind: 'write', paths: ['notes/a.md', 'notes/b.md'] },
+			}),
+		).rejects.toThrow('write on 2 file(s)')
+		await expect(
+			guard({ type: 'bash', command: 'rm -rf notes' }),
+		).rejects.toThrow('bash: denied-by-user')
+		await expect(
+			guard({
+				type: 'settings',
+				settings: {
+					action: 'update',
+					summary: 'settings on 1 key',
+					changes: {},
+				},
+			}),
+		).rejects.toThrow('settings on 1 key')
+		expect(modalOpenMock).not.toHaveBeenCalled()
 	})
 })

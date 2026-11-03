@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
 	aiProviderDefinitionsSchema,
 	type AIProviderDefinition,
-} from '../core/types'
+} from '~/ai/core/types'
 import {
 	createModelConfig,
 	createProviderConfig,
@@ -43,6 +43,45 @@ describe('ai config', () => {
 
 		expect(second.modalities.input).toEqual(['text'])
 		expect(second.limit.context).toBe(0)
+	})
+
+	it('does not alias nested cost/interleaved/experimental from the source', () => {
+		const source = {
+			cost: {
+				input: 1,
+				output: 2,
+				context_over_200k: { input: 3, output: 4 },
+			},
+			interleaved: { field: 'reasoning_content' },
+			experimental: { vendor: 'example' },
+		}
+		const config = createModelConfig(source)
+
+		config.cost!.input = 999
+		config.cost!.context_over_200k!.output = 999
+		;(config.interleaved as unknown as { field: string }).field = 'changed'
+		;(config.experimental as unknown as { vendor: string }).vendor = 'changed'
+
+		expect(source.cost.input).toBe(1)
+		expect(source.cost.context_over_200k.output).toBe(4)
+		expect(source.interleaved.field).toBe('reasoning_content')
+		expect(source.experimental.vendor).toBe('example')
+	})
+
+	it('copies provider headers without aliasing or unsafe keys', () => {
+		const headers = {
+			['__proto__']: 'bad',
+			'x-custom': 'value',
+		}
+		const config = createProviderConfig({
+			id: 'provider',
+			name: ' Provider ',
+			headers,
+		})
+
+		expect(config.headers).toEqual({ 'x-custom': 'value' })
+		headers['x-custom'] = 'changed'
+		expect(config.headers?.['x-custom']).toBe('value')
 	})
 
 	it('sanitizes provider objects', () => {

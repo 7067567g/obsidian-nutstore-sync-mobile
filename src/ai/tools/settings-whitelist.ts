@@ -1,11 +1,28 @@
-import { parse as bytesParse } from 'bytes-iec'
-import { clamp, isNil, isNumber } from 'lodash-es'
-import i18n from '~/i18n'
+import { isNil } from 'lodash-es'
 import type { NutstoreSettings } from '~/settings'
-import type { GlobFilterRule } from '~/utils/glob-match'
-import GlobMatch, { isVoidGlobMatchOptions } from '~/utils/glob-match'
-import { normalizeByteSizeInput } from '~/utils/download-chunk-size'
 import { tryParseTokenLimitInput } from '~/utils/token-limit'
+import {
+	CONFIG_DIR_SYNC_MODES,
+	CONFLICT_STRATEGIES,
+	LANGUAGES,
+	MAX_SECONDS,
+	SYNC_MODES,
+	WHITELIST_KEYS,
+	isObject,
+	jsonError,
+} from './settings-whitelist-schema'
+import {
+	parseBoolean,
+	parseByteSize,
+	parseClampedInteger,
+	parseEnum,
+	parseFilterRules,
+} from './settings-whitelist-parse'
+import type {
+	AIModelLimitWhitelistEntry,
+	NormalizedSettingsPatch,
+	SettingsParseResult,
+} from './settings-whitelist-types'
 
 /**
  * The subset of plugin settings the AI agent is allowed to read and modify
@@ -13,58 +30,22 @@ import { tryParseTokenLimitInput } from '~/utils/token-limit'
  *
  * Deliberately excludes credentials (account, credential, oauth response),
  * enterprise base URL, and AI provider secrets.
+ *
+ * The shared types, field parsers, serialization, diffing, and description
+ * pieces live in the sibling `settings-whitelist-*` modules; this file keeps
+ * the public entry point and re-exports the frozen surface.
  */
 
-export type WhitelistFilterRule = {
-	expr: string
-	type: 'include' | 'exclude'
-	caseSensitive?: boolean
-	disabled?: boolean
-}
-
-export interface AIModelLimitWhitelistEntry {
-	providerId: string
-	modelId: string
-	context?: number
-	output?: number
-}
-
-export type SettingsWhitelistFile = {
-	filterRules?: { rules: WhitelistFilterRule[] }
-	skipLargeFiles?: { maxSize?: string }
-	startupSyncDelaySeconds?: number
-	autoSyncIntervalSeconds?: number
-	realtimeSync?: boolean
-	confirmBeforeSync?: boolean
-	confirmBeforeDeleteInAutoSync?: boolean
-	syncMode?: NutstoreSettings['syncMode']
-	conflictStrategy?: NutstoreSettings['conflictStrategy']
-	configDirSyncMode?: 'none' | 'bookmarks' | 'all'
-	language?: 'zh' | 'en' | ''
-	aiModelLimits?: AIModelLimitWhitelistEntry[]
-	/** Active wall-clock tool timeout in seconds; 0 disables it. */
-	toolTimeoutSeconds?: number
-}
-
-export type NormalizedSettingsPatch = {
-	filterRules?: GlobFilterRule[]
-	skipLargeFilesMaxSize?: string
-	startupSyncDelaySeconds?: number
-	autoSyncIntervalSeconds?: number
-	realtimeSync?: boolean
-	confirmBeforeSync?: boolean
-	confirmBeforeDeleteInAutoSync?: boolean
-	syncMode?: NutstoreSettings['syncMode']
-	conflictStrategy?: NutstoreSettings['conflictStrategy']
-	configDirSyncMode?: 'none' | 'bookmarks' | 'all'
-	language?: 'zh' | 'en' | ''
-	aiModelLimits?: AIModelLimitWhitelistEntry[]
-	toolTimeoutSeconds?: number
-}
-
-export type SettingsParseResult =
-	| { ok: true; patch: NormalizedSettingsPatch; text: string }
-	| { ok: false; error: string }
+export type {
+	AIModelLimitWhitelistEntry,
+	NormalizedSettingsPatch,
+	SettingsParseResult,
+	SettingsWhitelistFile,
+	WhitelistFilterRule,
+} from './settings-whitelist-types'
+export { serializeSettingsWhitelist } from './settings-whitelist-serialize'
+export { getChangedSettingsPatch } from './settings-whitelist-diff'
+export { describeSettingsPatch } from './settings-whitelist-describe'
 
 export function applyNormalizedSettingsPatch(
 	settings: NutstoreSettings,
@@ -103,6 +84,9 @@ export function applyNormalizedSettingsPatch(
 	if (patch.language !== undefined) {
 		settings.language = patch.language || undefined
 	}
+	if (patch.bashAccess !== undefined) {
+		settings.ai.bashAccess = patch.bashAccess
+	}
 	if (patch.toolTimeoutSeconds !== undefined) {
 		settings.ai.toolTimeoutMs =
 			patch.toolTimeoutSeconds > 0 ? patch.toolTimeoutSeconds * 1000 : undefined
@@ -119,194 +103,6 @@ export function applyNormalizedSettingsPatch(
 			}
 		}
 	}
-}
-
-const MAX_FILE_SIZE = '500MB'
-const MAX_BYTES = bytesParse(MAX_FILE_SIZE, { mode: 'jedec' })!
-
-const MAX_FILTER_RULES = 200
-const MAX_SECONDS = 86400
-
-const CONFLICT_STRATEGIES = new Set<string>([
-	'no-conflict-merge',
-	'diff3',
-	'local-priority',
-	'server-priority',
-])
-const SYNC_MODES = new Set<string>(['strict', 'loose'])
-const CONFIG_DIR_SYNC_MODES = new Set<string>(['none', 'bookmarks', 'all'])
-const LANGUAGES = new Set<string>(['zh', 'en', ''])
-const FILTER_RULE_TYPES = new Set<string>(['include', 'exclude'])
-
-const WHITELIST_KEYS = new Set([
-	'filterRules',
-	'skipLargeFiles',
-	'startupSyncDelaySeconds',
-	'autoSyncIntervalSeconds',
-	'realtimeSync',
-	'confirmBeforeSync',
-	'confirmBeforeDeleteInAutoSync',
-	'syncMode',
-	'conflictStrategy',
-	'configDirSyncMode',
-	'language',
-	'aiModelLimits',
-	'toolTimeoutSeconds',
-])
-
-type JsonObject = Record<string, unknown>
-
-function isObject(value: unknown): value is JsonObject {
-	return !!value && typeof value === 'object' && !Array.isArray(value)
-}
-
-function jsonError(fieldPath: string, expected: string): string {
-	return `invalid setting '${fieldPath}': expected ${expected}`
-}
-
-function normalizeFilterRule(
-	path: string,
-	value: unknown,
-	index: number,
-	rules: GlobFilterRule[],
-): string | null {
-	const name = `${path}.rules[${index}]`
-	if (!isObject(value)) {
-		return jsonError(name, 'an object')
-	}
-	const expr = value.expr
-	if (typeof expr !== 'string' || expr.trim() === '') {
-		return jsonError(`${name}.expr`, 'a non-empty string')
-	}
-	const type = value.type
-	if (typeof type !== 'string' || !FILTER_RULE_TYPES.has(type)) {
-		return jsonError(`${name}.type`, "'include' or 'exclude'")
-	}
-	const caseSensitive = value.caseSensitive
-	if (caseSensitive !== undefined && typeof caseSensitive !== 'boolean') {
-		return jsonError(`${name}.caseSensitive`, 'a boolean')
-	}
-	const disabled = value.disabled
-	if (disabled !== undefined && typeof disabled !== 'boolean') {
-		return jsonError(`${name}.disabled`, 'a boolean')
-	}
-	const options = { caseSensitive: caseSensitive === true }
-	const rule: GlobFilterRule = {
-		expr,
-		options,
-		type: type as 'include' | 'exclude',
-		...(disabled === true ? { disabled: true } : {}),
-	}
-	if (isVoidGlobMatchOptions(rule)) {
-		return jsonError(`${name}.expr`, 'a non-empty pattern')
-	}
-	try {
-		new GlobMatch(expr, options)
-	} catch {
-		return jsonError(`${name}.expr`, 'a valid glob pattern')
-	}
-	rules.push(rule)
-	return null
-}
-
-function parseFilterRules(
-	path: string,
-	value: unknown,
-): {
-	rules: GlobFilterRule[]
-	error: string | null
-} {
-	if (!isObject(value)) {
-		return { rules: [], error: jsonError(path, 'an object with a rules array') }
-	}
-	if (!Array.isArray(value.rules)) {
-		return { rules: [], error: jsonError(`${path}.rules`, 'an array') }
-	}
-	if (value.rules.length > MAX_FILTER_RULES) {
-		return {
-			rules: [],
-			error: `invalid setting '${path}.rules': too many rules (max ${MAX_FILTER_RULES})`,
-		}
-	}
-	const rules: GlobFilterRule[] = []
-	for (let index = 0; index < value.rules.length; index += 1) {
-		const error = normalizeFilterRule(path, value.rules[index], index, rules)
-		if (error) {
-			return { rules: [], error }
-		}
-	}
-	return { rules, error: null }
-}
-
-function parseByteSize(
-	path: string,
-	value: unknown,
-): {
-	size: string | null
-	error: string | null
-} {
-	if (typeof value !== 'string') {
-		return { size: null, error: jsonError(path, 'a byte size string') }
-	}
-	const normalized = normalizeByteSizeInput(value, '')
-	if (!normalized) {
-		return {
-			size: null,
-			error: jsonError(path, 'a non-empty byte size string'),
-		}
-	}
-	const parsed = bytesParse(normalized, { mode: 'jedec' })
-	if (parsed === null) {
-		return { size: null, error: jsonError(path, 'a valid byte size string') }
-	}
-	if (parsed > MAX_BYTES) {
-		return {
-			size: null,
-			error: `invalid setting '${path}': exceeds the maximum of ${MAX_FILE_SIZE}`,
-		}
-	}
-	return { size: normalized, error: null }
-}
-
-function parseClampedInteger(
-	path: string,
-	value: unknown,
-	min: number,
-	max: number,
-): { number: number | null; error: string | null } {
-	if (
-		typeof value !== 'number' ||
-		!isNumber(value) ||
-		!Number.isFinite(value)
-	) {
-		return { number: null, error: jsonError(path, 'a number') }
-	}
-	return { number: clamp(value, min, max), error: null }
-}
-
-function parseBoolean(
-	path: string,
-	value: unknown,
-): {
-	boolean: boolean | null
-	error: string | null
-} {
-	if (value !== true && value !== false) {
-		return { boolean: null, error: jsonError(path, 'a boolean') }
-	}
-	return { boolean: value, error: null }
-}
-
-function parseEnum(
-	path: string,
-	value: unknown,
-	allowed: Set<string>,
-	label: string,
-): { value: string | null; error: string | null } {
-	if (typeof value !== 'string' || !allowed.has(value)) {
-		return { value: null, error: jsonError(path, label) }
-	}
-	return { value, error: null }
 }
 
 const MAX_AI_MODEL_LIMIT_ENTRIES = 500
@@ -327,7 +123,9 @@ function parseAIModelLimits(value: unknown): {
 	const entries: AIModelLimitWhitelistEntry[] = []
 	for (let index = 0; index < value.length; index += 1) {
 		const name = `aiModelLimits[${index}]`
-		const entry = value[index]
+		// `Array.isArray` narrows `unknown` to `any[]`; keep the loop boundary
+		// `unknown` so the `isObject` guard below does the real narrowing.
+		const entry: unknown = value[index]
 		if (!isObject(entry))
 			return { entries: [], error: jsonError(name, 'an object') }
 		const providerId = entry.providerId
@@ -551,260 +349,4 @@ export function parseSettingsWhitelistJson(text: string): SettingsParseResult {
 		}
 	}
 	return { ok: true, patch, text }
-}
-
-export function serializeSettingsWhitelist(settings: NutstoreSettings): string {
-	const file: SettingsWhitelistFile = {
-		filterRules: {
-			rules: (settings.filterRules?.rules ?? []).map((rule) => ({
-				expr: rule.expr,
-				type: rule.type,
-				caseSensitive: rule.options.caseSensitive === true,
-				disabled: rule.disabled === true ? true : undefined,
-			})),
-		},
-		skipLargeFiles: { maxSize: settings.skipLargeFiles?.maxSize },
-		startupSyncDelaySeconds: settings.startupSyncDelaySeconds,
-		autoSyncIntervalSeconds: settings.autoSyncIntervalSeconds,
-		realtimeSync: settings.realtimeSync,
-		confirmBeforeSync: settings.confirmBeforeSync,
-		confirmBeforeDeleteInAutoSync: settings.confirmBeforeDeleteInAutoSync,
-		syncMode: settings.syncMode,
-		conflictStrategy: settings.conflictStrategy,
-		configDirSyncMode: settings.configDirSyncMode ?? 'none',
-		language: settings.language ?? '',
-		toolTimeoutSeconds: settings.ai?.toolTimeoutMs
-			? Math.round(settings.ai.toolTimeoutMs / 1000)
-			: 0,
-		aiModelLimits: Object.entries(settings.ai?.providers ?? {}).flatMap(
-			([providerId, provider]) =>
-				Object.entries(provider.models ?? {}).map(([modelId, model]) => ({
-					providerId,
-					modelId,
-					context: model.limit?.context ?? 0,
-					output: model.limit?.output ?? 0,
-				})),
-		),
-	}
-	return `${JSON.stringify(file, null, 2)}\n`
-}
-
-function areFilterRulesEqual(
-	currentRules: GlobFilterRule[],
-	nextRules: GlobFilterRule[],
-) {
-	if (currentRules.length !== nextRules.length) {
-		return false
-	}
-	return currentRules.every((currentRule, index) => {
-		const nextRule = nextRules[index]
-		return (
-			currentRule.expr === nextRule.expr &&
-			currentRule.type === nextRule.type &&
-			currentRule.options.caseSensitive === nextRule.options.caseSensitive &&
-			(currentRule.disabled === true) === (nextRule.disabled === true)
-		)
-	})
-}
-
-function areByteSizesEqual(current: string | undefined, next: string) {
-	if (current === next) {
-		return true
-	}
-	const currentBytes = current ? bytesParse(current, { mode: 'jedec' }) : null
-	const nextBytes = bytesParse(next, { mode: 'jedec' })
-	return (
-		currentBytes !== null && nextBytes !== null && currentBytes === nextBytes
-	)
-}
-
-export function getChangedSettingsPatch(
-	settings: NutstoreSettings,
-	patch: NormalizedSettingsPatch,
-): NormalizedSettingsPatch {
-	const changes: NormalizedSettingsPatch = {}
-	if (
-		patch.filterRules !== undefined &&
-		!areFilterRulesEqual(settings.filterRules?.rules ?? [], patch.filterRules)
-	) {
-		changes.filterRules = patch.filterRules
-	}
-	if (
-		patch.skipLargeFilesMaxSize !== undefined &&
-		!areByteSizesEqual(
-			settings.skipLargeFiles?.maxSize,
-			patch.skipLargeFilesMaxSize,
-		)
-	) {
-		changes.skipLargeFilesMaxSize = patch.skipLargeFilesMaxSize
-	}
-	if (
-		patch.startupSyncDelaySeconds !== undefined &&
-		patch.startupSyncDelaySeconds !== settings.startupSyncDelaySeconds
-	) {
-		changes.startupSyncDelaySeconds = patch.startupSyncDelaySeconds
-	}
-	if (
-		patch.autoSyncIntervalSeconds !== undefined &&
-		patch.autoSyncIntervalSeconds !== settings.autoSyncIntervalSeconds
-	) {
-		changes.autoSyncIntervalSeconds = patch.autoSyncIntervalSeconds
-	}
-	if (
-		patch.realtimeSync !== undefined &&
-		patch.realtimeSync !== settings.realtimeSync
-	) {
-		changes.realtimeSync = patch.realtimeSync
-	}
-	if (
-		patch.confirmBeforeSync !== undefined &&
-		patch.confirmBeforeSync !== settings.confirmBeforeSync
-	) {
-		changes.confirmBeforeSync = patch.confirmBeforeSync
-	}
-	if (
-		patch.confirmBeforeDeleteInAutoSync !== undefined &&
-		patch.confirmBeforeDeleteInAutoSync !==
-			settings.confirmBeforeDeleteInAutoSync
-	) {
-		changes.confirmBeforeDeleteInAutoSync = patch.confirmBeforeDeleteInAutoSync
-	}
-	if (patch.syncMode !== undefined && patch.syncMode !== settings.syncMode) {
-		changes.syncMode = patch.syncMode
-	}
-	if (
-		patch.conflictStrategy !== undefined &&
-		patch.conflictStrategy !== settings.conflictStrategy
-	) {
-		changes.conflictStrategy = patch.conflictStrategy
-	}
-	if (
-		patch.configDirSyncMode !== undefined &&
-		patch.configDirSyncMode !== (settings.configDirSyncMode ?? 'none')
-	) {
-		changes.configDirSyncMode = patch.configDirSyncMode
-	}
-	if (
-		patch.language !== undefined &&
-		patch.language !== (settings.language ?? '')
-	) {
-		changes.language = patch.language
-	}
-	if (patch.toolTimeoutSeconds !== undefined) {
-		const currentToolTimeout = settings.ai?.toolTimeoutMs
-			? Math.round(settings.ai.toolTimeoutMs / 1000)
-			: 0
-		if (patch.toolTimeoutSeconds !== currentToolTimeout) {
-			changes.toolTimeoutSeconds = patch.toolTimeoutSeconds
-		}
-	}
-	if (patch.aiModelLimits !== undefined) {
-		const changedLimits = patch.aiModelLimits.filter((entry) => {
-			const model =
-				settings.ai?.providers?.[entry.providerId]?.models?.[entry.modelId]
-			if (!model) return true
-			return (
-				(entry.context !== undefined &&
-					entry.context !== model.limit?.context) ||
-				(entry.output !== undefined && entry.output !== model.limit?.output)
-			)
-		})
-		if (changedLimits.length > 0) {
-			changes.aiModelLimits = changedLimits
-		}
-	}
-	return changes
-}
-
-function describeFilterRules(patch: NormalizedSettingsPatch): string {
-	const rules = patch.filterRules ?? []
-	if (rules.length === 0) {
-		return i18n.t('aiPermission.settings.fields.filterRules.empty')
-	}
-	return rules
-		.slice(0, 5)
-		.map(
-			(rule) =>
-				`${rule.type === 'include' ? '+' : '-'} ${rule.expr}${
-					rule.disabled === true
-						? ` ${i18n.t('aiPermission.settings.fields.filterRules.disabled')}`
-						: ''
-				}`,
-		)
-		.join('; ')
-}
-
-export function describeSettingsPatch(
-	patch: NormalizedSettingsPatch,
-): string[] {
-	const lines: string[] = []
-	if (patch.filterRules !== undefined) {
-		lines.push(
-			`${i18n.t('aiPermission.settings.fields.filterRules.name')}: ${describeFilterRules(patch)}`,
-		)
-	}
-	if (patch.skipLargeFilesMaxSize !== undefined) {
-		lines.push(
-			`${i18n.t('aiPermission.settings.fields.skipLargeFiles.name')}: ${patch.skipLargeFilesMaxSize}`,
-		)
-	}
-	if (patch.startupSyncDelaySeconds !== undefined) {
-		lines.push(
-			`${i18n.t('aiPermission.settings.fields.startupSyncDelay.name')}: ${patch.startupSyncDelaySeconds}s`,
-		)
-	}
-	if (patch.autoSyncIntervalSeconds !== undefined) {
-		lines.push(
-			`${i18n.t('aiPermission.settings.fields.autoSyncInterval.name')}: ${Math.round(patch.autoSyncIntervalSeconds / 60)}min`,
-		)
-	}
-	if (patch.realtimeSync !== undefined) {
-		lines.push(
-			`${i18n.t('aiPermission.settings.fields.realtimeSync.name')}: ${i18n.t(patch.realtimeSync ? 'aiPermission.settings.on' : 'aiPermission.settings.off')}`,
-		)
-	}
-	if (patch.confirmBeforeSync !== undefined) {
-		lines.push(
-			`${i18n.t('aiPermission.settings.fields.confirmBeforeSync.name')}: ${i18n.t(patch.confirmBeforeSync ? 'aiPermission.settings.on' : 'aiPermission.settings.off')}`,
-		)
-	}
-	if (patch.confirmBeforeDeleteInAutoSync !== undefined) {
-		lines.push(
-			`${i18n.t('aiPermission.settings.fields.confirmBeforeDeleteInAutoSync.name')}: ${i18n.t(patch.confirmBeforeDeleteInAutoSync ? 'aiPermission.settings.on' : 'aiPermission.settings.off')}`,
-		)
-	}
-	if (patch.syncMode !== undefined) {
-		lines.push(
-			`${i18n.t('aiPermission.settings.fields.syncMode.name')}: ${patch.syncMode}`,
-		)
-	}
-	if (patch.conflictStrategy !== undefined) {
-		lines.push(
-			`${i18n.t('aiPermission.settings.fields.conflictStrategy.name')}: ${patch.conflictStrategy}`,
-		)
-	}
-	if (patch.configDirSyncMode !== undefined) {
-		lines.push(
-			`${i18n.t('aiPermission.settings.fields.configDirSyncMode.name')}: ${patch.configDirSyncMode}`,
-		)
-	}
-	if (patch.language !== undefined) {
-		lines.push(
-			`${i18n.t('aiPermission.settings.fields.language.name')}: ${patch.language === '' ? i18n.t('aiPermission.settings.fields.language.auto') : patch.language}`,
-		)
-	}
-	if (patch.aiModelLimits !== undefined) {
-		for (const entry of patch.aiModelLimits.slice(0, 8)) {
-			const limits = [
-				entry.context !== undefined ? `context=${entry.context}` : '',
-				entry.output !== undefined ? `output=${entry.output}` : '',
-			]
-				.filter(Boolean)
-				.join(', ')
-			lines.push(
-				`${i18n.t('aiPermission.settings.fields.aiModelLimits.name')}: ${entry.providerId}/${entry.modelId} ${limits}`,
-			)
-		}
-	}
-	return lines
 }

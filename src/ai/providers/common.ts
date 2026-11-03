@@ -1,6 +1,9 @@
 import { wrapLanguageModel } from 'ai'
 import type { AIProviderConfig } from '~/ai/core/types'
-import { createProviderFetch } from '~/ai/transport/provider-fetch'
+import {
+	createProviderFetch,
+	type ProviderRequestContext,
+} from '~/ai/transport/provider-fetch'
 import { NUTSTORE_LLM_GATEWAY_PROVIDER_ID } from '~/consts'
 import i18n from '~/i18n'
 import type { ResolvedLanguageModel } from './types'
@@ -19,12 +22,15 @@ export function assertProviderApiKeyUsable(provider: AIProviderConfig) {
 	throw new Error(i18n.t('chatbox.errors.apiKeyRequired'))
 }
 
-export function createProviderSettings(provider: AIProviderConfig) {
+export function createProviderSettings(
+	provider: AIProviderConfig,
+	context: ProviderRequestContext = {},
+) {
 	return {
 		name: provider.name,
 		baseURL: provider.api,
 		apiKey: provider.apiKey,
-		fetch: createProviderFetch(provider),
+		fetch: createProviderFetch(provider, context),
 	}
 }
 

@@ -1,8 +1,5 @@
-import type {
-	ChatState,
-	SessionRuntimeState,
-} from '~/ai/chat/runtime/chat-state'
-import { createMasterTurnScheduler } from '~/ai/chat/runtime/master-turn-scheduler'
+import type { ChatState, SessionRuntimeState } from './chat-state'
+import { createMasterTurnScheduler } from './master-turn-scheduler'
 
 export class RuntimeStates {
 	constructor(private state: ChatState) {}

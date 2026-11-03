@@ -1,6 +1,6 @@
 import { normalizePath, Vault } from 'obsidian'
 import { StatModel } from '~/model/stat.model'
-import logger from '~/utils/logger'
+import logger from './logger'
 import { getConfigDirSystemTraversalRules } from './config-dir-rules'
 import GlobMatch from './glob-match'
 import { statVaultItem } from './stat-vault-item'

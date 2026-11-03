@@ -129,6 +129,19 @@
 					"modelsFailed": "获取坚果云 AI 模型失败：{{status}}",
 					"emptyModels": "坚果云 AI 没有返回可用模型",
 					"refreshFailed": "刷新坚果云 AI 模型失败"
+				},
+				"degradation": {
+					"message": "坚果云 AI 暂不可用：{{reason}}。本地会话不受影响；可改用其他模型或稍后重试。",
+					"reasons": {
+						"offline": "网络不可用或无法连接网关",
+						"timeout": "请求超时",
+						"tlsError": "TLS/证书校验失败",
+						"unauthorized": "授权已失效或未授权",
+						"httpError": "服务返回错误",
+						"methodNotAllowed": "所用 HTTP 方法不被端点接受",
+						"notConfigured": "尚未配置",
+						"unknown": "未知错误"
+					}
 				}
 			},
 			"providers": {
@@ -175,6 +188,14 @@
 					"openaiResponses": "OpenAI Responses",
 					"anthropic": "Anthropic Messages",
 					"other": "其他（{{npm}}）"
+				},
+				"headers": {
+					"name": "自定义请求头",
+					"desc": "随该提供商的模型请求发送的附加 HTTP 请求头（值不会写入日志）",
+					"headerKeyPlaceholder": "请求头名称",
+					"headerValuePlaceholder": "请求头值",
+					"addHeader": "添加请求头",
+					"removeHeader": "删除请求头"
 				}
 			},
 			"models": {
@@ -301,11 +322,28 @@
 			},
 			"windowedRendering": {
 				"name": "长会话窗口化渲染",
-				"desc": "使用浏览器原生 content-visibility 跳过屏幕外消息的布局/绘制。关闭后回退到旧的全量渲染。"
+				"desc": "只挂载最近一页消息，更早内容按页加载，并按保留堆预算回收最旧页。关闭后回退到全量渲染。"
 			},
 			"toolTimeout": {
 				"name": "工具超时（秒）",
 				"desc": "虚拟 bash 等协作式工具的 active wall-clock 预算；留空关闭。页面隐藏/后台时间不计入。"
+			},
+			"bashAccess": {
+				"name": "Bash 工具权限",
+				"desc": "默认关闭。ask 沿用现有逐操作确认；always 才允许 AI 直接执行 bash 脚本。",
+				"options": {
+					"deny": "关闭（推荐）",
+					"ask": "需要确认",
+					"always": "始终允许"
+				}
+			},
+			"compressionBackend": {
+				"name": "上下文压缩后端",
+				"desc": "deterministic 纯本地提取（默认，无网络/模型调用）；llm 使用模型摘要。",
+				"options": {
+					"deterministic": "本地确定性（推荐）",
+					"llm": "模型摘要（LLM）"
+				}
 			}
 		},
 		"confirmBeforeSync": {
@@ -546,7 +584,14 @@
 					"name": "模型上下文/输出上限"
 				}
 			}
-		}
+		},
+		"allowSession": "本次会话允许",
+		"bash": {
+			"message": "AI 请求执行以下 bash 命令：",
+			"hint": "同意 / 本次会话 / 始终允许；始终允许会写入设置并在后续会话生效。",
+			"command": "命令"
+		},
+		"alwaysAllowPermanent": "始终允许"
 	},
 	"sync": {
 		"error": {
@@ -738,7 +783,8 @@
 				"deleteMessage": "删除消息",
 				"regenerateMessage": "重新生成",
 				"recallMessage": "撤回",
-				"removeContextItem": "移除"
+				"removeContextItem": "移除",
+				"loadEarlier": "加载更早的 {{count}} 条消息"
 			},
 			"tooltips": {
 				"contextUsage": "上下文：已用 {{used}}%（窗口 {{total}} tokens · 总计 {{usedTokens}}）"
@@ -754,7 +800,10 @@
 				"contextArea": "上下文",
 				"reasoning": "推理",
 				"todoList": "待办列表",
-				"systemNotification": "系统通知"
+				"systemNotification": "系统通知",
+				"removeQueuedSubmission": "删除排队内容",
+				"removeQueuedSubmissionFailed": "删除失败：这条消息可能已经开始发送",
+				"reasoningOnlyNotice": "本轮输出位于折叠的“思考”通道，请展开查看。"
 			},
 			"fileChanges": {
 				"create": "新增",
@@ -882,5 +931,8 @@
 		"labels": {
 			"currentPath": "当前路径"
 		}
+	},
+	"startup": {
+		"repeatedAbnormalStarts": "检测到上次进程退出。会话可在 Chatbox 中检查。"
 	}
 }

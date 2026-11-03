@@ -4,7 +4,7 @@ import type {
 	ChatAgentState,
 	ChatTodoItem,
 	LegacyChatMessageRecord,
-} from '~/ai/chat/types'
+} from './types'
 
 export interface ChatFragment {
 	id: string

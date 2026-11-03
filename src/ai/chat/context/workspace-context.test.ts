@@ -3,7 +3,7 @@ import { hash as hashObject } from 'ohash'
 import {
 	captureWorkspaceContexts,
 	computeChangedContexts,
-} from '~/ai/chat/context/workspace-context'
+} from './workspace-context'
 import type { SkillRepository } from '~/ai/skills/repository'
 import type { AppUIMessage, WorkspaceContextDelta } from '~/ai/chat/types'
 
@@ -145,5 +145,59 @@ describe('workspace skill context', () => {
 			content: [],
 			hash: hashObject([]),
 		})
+	})
+})
+
+describe('workspace open files context', () => {
+	function leaf(
+		path: string,
+		viewType: string,
+		connected = true,
+	): { view: unknown } {
+		return {
+			view: {
+				file: { path },
+				getViewType: () => viewType,
+				containerEl: { isConnected: connected },
+			},
+		}
+	}
+
+	it('lists supported connected leaves and skips unsupported or detached ones', () => {
+		const leaves = [
+			leaf('notes/a.md', 'markdown'),
+			leaf('board.canvas', 'canvas'),
+			leaf('notes/b.md', 'markdown', false),
+			leaf('unsupported.md', 'unsupported-view'),
+		]
+		const app = {
+			workspace: {
+				getActiveFile: () => ({ path: 'notes/a.md' }),
+				iterateAllLeaves: (callback: (value: unknown) => void) => {
+					for (const value of leaves) callback(value)
+				},
+			},
+		} as never
+
+		const openFiles = captureWorkspaceContexts(app).find(
+			(entry) => entry.key === 'openFiles',
+		)
+		expect(openFiles?.content).toEqual(['board.canvas', 'notes/a.md'])
+	})
+
+	it('drops leaves without a connected container', () => {
+		const app = {
+			workspace: {
+				getActiveFile: () => null,
+				iterateAllLeaves: (callback: (value: unknown) => void) => {
+					callback(leaf('detached.md', 'markdown', false))
+				},
+			},
+		} as never
+
+		const openFiles = captureWorkspaceContexts(app).find(
+			(entry) => entry.key === 'openFiles',
+		)
+		expect(openFiles?.content).toEqual([])
 	})
 })

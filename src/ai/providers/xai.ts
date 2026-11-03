@@ -9,9 +9,9 @@ import type { AIProviderResolver } from './types'
 
 export const xaiProviderResolver: AIProviderResolver = {
 	assertUsable: assertProviderApiKeyUsable,
-	createLanguageModel(provider, modelId) {
+	createLanguageModel(provider, modelId, context) {
 		assertProviderApiKeyUsable(provider)
-		const settings = createProviderSettings(provider)
+		const settings = createProviderSettings(provider, context)
 		const factory = createOpenAICompatible({
 			...settings,
 			baseURL: settings.baseURL || XAI_DEFAULT_BASE_URL,

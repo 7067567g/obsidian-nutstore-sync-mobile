@@ -12,8 +12,8 @@ import type {
 import {
 	buildMessageDisplayBlocks,
 	messageHasUserContext,
-} from '~/ai/chat/ui/display-blocks'
-import type { ChatboxProps } from '~/ai/chat/ui/types'
+} from './display-blocks'
+import type { ChatboxProps } from './types'
 
 // Solid stores attach reactive Symbol metadata to wrapped plain objects. Keep
 // that metadata in the view layer instead of mutating the canonical session.
@@ -34,7 +34,9 @@ function snapshotViewValue<T>(
 		return snapshot as T
 	}
 
-	const prototype = Object.getPrototypeOf(value)
+	// `Object.getPrototypeOf` is typed `any`; keep the boundary explicit so
+	// `Object.create` receives `object | null`.
+	const prototype = Object.getPrototypeOf(value) as object | null
 	if (prototype !== Object.prototype && prototype !== null) return value
 
 	const snapshot = Object.create(prototype) as Record<string, unknown>
@@ -70,12 +72,25 @@ interface MessageProjection {
  * `projectTextDelta` replaces the text part object, tool results replace the
  * dynamic-tool part object, `toolTimings[id]` is replaced, and
  * `operations[messageId]` arrays are replaced. The signatures compare those
- * object identities, so an in-place mutation would be missed.
+ * object identities, and the shallow content revisions below additionally
+ * catch one-level in-place writes (part fields, `message.role`,
+ * `message.metadata` fields, operations array length/entries). A deeper
+ * in-place write inside a nested value still requires immutable replacement.
  */
 const agentTimelineCache = new WeakMap<ChatAgentState, AgentTimelineCache>()
 const messageProjections = new WeakMap<AppUIMessage, MessageProjection>()
-const partSnapshots = new WeakMap<object, AppUIMessagePart>()
-const operationsSnapshots = new WeakMap<object, ReversibleToolOp[]>()
+const partSnapshots = new WeakMap<object, PartSnapshot>()
+const operationsSnapshots = new WeakMap<object, OperationsSnapshot>()
+
+interface PartSnapshot {
+	revision: number
+	snapshot: AppUIMessagePart
+}
+
+interface OperationsSnapshot {
+	revision: number
+	snapshot: ReversibleToolOp[]
+}
 
 function sameSignature(left: readonly unknown[], right: readonly unknown[]) {
 	if (left.length !== right.length) return false
@@ -96,6 +111,36 @@ function objectId(value: object) {
 	return id
 }
 
+interface ContentRevision {
+	revision: number
+	values: unknown[]
+}
+
+/**
+ * Track a shallow content revision for cached objects. Values are compared by
+ * `Object.is`, so scalar in-place writes and nested reference replacements bump
+ * the revision while an untouched object keeps returning the same number.
+ */
+function trackContentRevision<T extends object>() {
+	const revisions = new WeakMap<T, ContentRevision>()
+	return (value: T): number => {
+		const values = Object.values(value)
+		const existing = revisions.get(value)
+		if (!existing) {
+			revisions.set(value, { revision: 1, values })
+			return 1
+		}
+		if (sameSignature(existing.values, values)) return existing.revision
+		existing.revision += 1
+		existing.values = values
+		return existing.revision
+	}
+}
+
+const partRevisions = trackContentRevision<AppUIMessagePart>()
+const metadataRevisions = trackContentRevision<object>()
+const operationsRevisions = trackContentRevision<ReversibleToolOp[]>()
+
 function mixHash(hash: number, value: number) {
 	return Math.imul(hash ^ (value | 0), 16777619) >>> 0
 }
@@ -110,20 +155,22 @@ function mixString(hash: number, value: string) {
 
 function snapshotPart(part: AppUIMessagePart): AppUIMessagePart {
 	const key = part as object
+	const revision = partRevisions(part)
 	const cached = partSnapshots.get(key)
-	if (cached) return cached
+	if (cached && cached.revision === revision) return cached.snapshot
 	const snapshot = snapshotViewValue(part)
-	partSnapshots.set(key, snapshot)
+	partSnapshots.set(key, { revision, snapshot })
 	return snapshot
 }
 
 function snapshotOperations(operations: ReversibleToolOp[] | undefined) {
 	if (!operations) return []
 	const key = operations as object
+	const revision = operationsRevisions(operations)
 	const cached = operationsSnapshots.get(key)
-	if (cached) return cached
+	if (cached && cached.revision === revision) return cached.snapshot
 	const snapshot = snapshotViewValue(operations)
-	operationsSnapshots.set(key, snapshot)
+	operationsSnapshots.set(key, { revision, snapshot })
 	return snapshot
 }
 
@@ -137,23 +184,38 @@ function snapshotMessage(message: AppUIMessage): AppUIMessage {
 	}
 }
 
-function messageFingerprint(
+function mixMessageProjection(
+	hash: number,
 	message: AppUIMessage,
 	operations: ReversibleToolOp[] | undefined,
 	toolTimings: ChatAgentState['toolTimings'],
 ) {
-	let hash = 2166136261
 	hash = mixHash(hash, objectId(message))
+	hash = mixString(hash, message.role)
+	if (message.metadata) {
+		hash = mixHash(hash, objectId(message.metadata))
+		hash = mixHash(hash, metadataRevisions(message.metadata))
+	}
 	hash = mixHash(hash, message.parts.length)
 	for (const part of message.parts) {
 		hash = mixHash(hash, objectId(part))
+		hash = mixHash(hash, partRevisions(part))
 		if (part.type === 'dynamic-tool') {
 			const timing = toolTimings[part.toolCallId]
 			hash = mixHash(hash, timing ? objectId(timing) : 0)
 		}
 	}
 	hash = mixHash(hash, operations ? objectId(operations) : 0)
+	hash = mixHash(hash, operations ? operationsRevisions(operations) : 0)
 	return hash
+}
+
+function messageFingerprint(
+	message: AppUIMessage,
+	operations: ReversibleToolOp[] | undefined,
+	toolTimings: ChatAgentState['toolTimings'],
+) {
+	return mixMessageProjection(2166136261, message, operations, toolTimings)
 }
 
 function projectMessage(
@@ -197,17 +259,12 @@ function agentSignature(agent: ChatAgentState) {
 	hash = mixHash(hash, agent.timeline.length)
 
 	for (const message of agent.timeline) {
-		hash = mixHash(hash, objectId(message))
-		hash = mixHash(hash, message.parts.length)
-		for (const part of message.parts) {
-			hash = mixHash(hash, objectId(part))
-			if (part.type === 'dynamic-tool') {
-				const timing = agent.toolTimings[part.toolCallId]
-				hash = mixHash(hash, timing ? objectId(timing) : 0)
-			}
-		}
-		const operations = agent.operations[message.id]
-		hash = mixHash(hash, operations ? objectId(operations) : 0)
+		hash = mixMessageProjection(
+			hash,
+			message,
+			agent.operations[message.id],
+			agent.toolTimings,
+		)
 	}
 	for (const [toolCallId, timing] of Object.entries(agent.toolTimings)) {
 		hash = mixString(hash, toolCallId)
@@ -238,6 +295,7 @@ function buildAgentTimeline(
 		)
 		if (!projection.blocks.length && !projection.hasContext) continue
 		const item: TimelineItem = {
+			id: message.id,
 			createdAt: message.metadata?.createdAt ?? createdAt,
 			message: projection.snapshot,
 			displayBlocks: projection.blocks,

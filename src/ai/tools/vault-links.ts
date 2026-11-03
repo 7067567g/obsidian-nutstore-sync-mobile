@@ -75,12 +75,18 @@ export async function executeVaultLinks(
 	const seenOutgoing = new Set<string>()
 	const cache = app.metadataCache.getFileCache(file)
 
+	let outgoingTruncated = false
 	const pushTarget = (kind: string, raw: string, sourcePath = file.path) => {
-		if (!raw.trim() || outgoing.length >= limit) return
+		if (!raw.trim()) return
 		const resolved = app.metadataCache.getFirstLinkpathDest(raw, sourcePath)
 		const target = resolved ? resolved.path : raw
 		const key = kind + '|' + target
 		if (seenOutgoing.has(key)) return
+		if (outgoing.length >= limit) {
+			// A unique target exists beyond the limit, so results are really cut.
+			outgoingTruncated = true
+			return
+		}
 		seenOutgoing.add(key)
 		outgoing.push({
 			kind,
@@ -93,15 +99,12 @@ export async function executeVaultLinks(
 	if (direction === 'outgoing' || direction === 'both') {
 		for (const entry of collectLinkLikes(cache)) {
 			pushTarget(entry.kind, entry.link.link)
-			if (outgoing.length >= limit) break
 		}
 		const rawFrontmatter = (cache?.frontmatter ?? {}) as Record<string, unknown>
 		for (const key of frontmatterKeys) {
 			for (const target of frontmatterTargets(rawFrontmatter[key])) {
 				pushTarget('frontmatter:' + key, target)
-				if (outgoing.length >= limit) break
 			}
-			if (outgoing.length >= limit) break
 		}
 	}
 
@@ -145,7 +148,7 @@ export async function executeVaultLinks(
 			path: file.path,
 			outgoing,
 			incoming,
-			truncated: outgoing.length >= limit || incomingCounts.size > limit,
+			truncated: outgoingTruncated || incomingCounts.size > limit,
 		},
 		null,
 		2,

@@ -9,20 +9,22 @@ import {
 	shouldAutoCompressAgent,
 	shouldStartContextCompaction,
 	type ContextCompressionPlan,
-} from '~/ai/chat/runtime/context-compression'
+	type ContextSummaryBackend,
+} from './context-compression'
 import type { SessionStore } from '~/ai/chat/session/session-store'
 import type { AppUIMessage, ChatAgentState } from '~/ai/chat/types'
 import type { AIModelConfig, AIProviderConfig } from '~/ai/core/types'
 import { createAbortError } from '~/ai/transport/abort'
 import logger from '~/utils/logger'
 
-export { createContextCompactionRevision } from '~/ai/chat/runtime/context-compaction-revision'
+export { createContextCompactionRevision } from './context-compaction-revision'
 
 export interface ContextCompactionRequest {
 	session: ChatSession
 	agent: ChatAgentState
 	provider: AIProviderConfig
 	model: AIModelConfig
+	backend?: ContextSummaryBackend
 	ensureProviderReady?: () => Promise<void>
 	resolveSummaryContext: () => Promise<{
 		system?: string
@@ -210,13 +212,18 @@ export class ContextCompactionCoordinator {
 			)
 			if (!plan) return { status: 'unavailable' }
 			if (!this.isCurrent(request)) return { status: 'stale' }
-			await request.ensureProviderReady?.()
-			if (!this.isCurrent(request)) return { status: 'stale' }
-			const summaryContext = await request.resolveSummaryContext()
+			const backend = request.backend ?? 'llm'
+			let summaryContext: { system?: string; tools?: ToolSet } = {}
+			if (backend !== 'deterministic') {
+				await request.ensureProviderReady?.()
+				if (!this.isCurrent(request)) return { status: 'stale' }
+				summaryContext = await request.resolveSummaryContext()
+			}
 			const summary = await generateContextCompression({
 				provider: request.provider,
 				model: request.model,
 				session: request.session,
+				backend,
 				plan,
 				...summaryContext,
 				buildMessages: request.buildMessages,

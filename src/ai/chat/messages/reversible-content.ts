@@ -49,6 +49,16 @@ export function isSkippedFileSnapshot(
 	return content.skipped !== undefined
 }
 
+function isBlobLike(value: unknown): value is Blob {
+	return (
+		!!value &&
+		typeof value === 'object' &&
+		typeof (value as Blob).arrayBuffer === 'function' &&
+		typeof (value as Blob).slice === 'function' &&
+		typeof (value as Blob).size === 'number'
+	)
+}
+
 export function hasCompressedFileContent(
 	content: ReversibleFileSnapshot,
 ): content is ReversibleFileSnapshot & {
@@ -56,7 +66,7 @@ export function hasCompressedFileContent(
 } {
 	return (
 		content.contentCompressed?.compress === 'deflate' &&
-		content.contentCompressed.blob instanceof Blob
+		isBlobLike(content.contentCompressed.blob)
 	)
 }
 
@@ -66,6 +76,14 @@ export async function decodeReversibleFileSnapshot(
 	if (isSkippedFileSnapshot(content)) {
 		throw new Error(
 			`Reversible snapshot content was not retained (${content.skipped.size} bytes, ${content.skipped.reason})`,
+		)
+	}
+	if (
+		content.contentCompressed?.compress === 'deflate' &&
+		!isBlobLike(content.contentCompressed.blob)
+	) {
+		throw new Error(
+			'Reversible snapshot declares deflate compression but does not carry a Blob; refusing to decode as base64',
 		)
 	}
 	if (hasCompressedFileContent(content)) {

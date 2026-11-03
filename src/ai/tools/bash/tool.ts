@@ -1,5 +1,4 @@
 import { posix as pathPosix } from 'path-browserify'
-import { idAgent } from 'id-agent'
 import { tool } from 'ai'
 import { z } from 'zod/mini'
 import {
@@ -8,9 +7,8 @@ import {
 	execVaultBash,
 	SETTINGS_MOUNT_POINT,
 	VAULT_MOUNT_POINT,
-} from '~/ai/tools/bash/runtime'
-import { BASH_TMP_MOUNT_POINT, writeBashTmpText } from '~/ai/tools/bash/tmp-fs'
-import { withPermissionPurpose } from '~/ai/tools/permission-guard'
+} from './runtime'
+import { BASH_TMP_MOUNT_POINT } from './tmp-fs'
 import {
 	appDep,
 	fileSystemManagerDep,
@@ -18,13 +16,18 @@ import {
 	permissionGuardDep,
 	readTrackerDep,
 	recordMetadataDep,
+	sessionDep,
 	updateSettingsDep,
 } from '~/ai/tools/tool-context'
+import {
+	TOOL_OUTPUT_INLINE_BUDGET_BYTES,
+	retainToolOutputForModel,
+} from '~/ai/chat/runtime/tool-output-retention'
+import { PermissionDeniedError } from '~/ai/chat/tool-outcome'
 import i18n from '~/i18n'
 import { perfMetrics } from '~/diagnostics/perf-metrics'
-import { booleanValue, textValue } from '../shared'
-
-const MAX_INLINE_BASH_OUTPUT_CHARS = 20 * 1024
+import logger from '~/utils/logger'
+import { booleanValue, textValue } from '~/ai/tools/shared'
 
 function isAllowedBashCwd(pathValue: string) {
 	const normalized = pathPosix.normalize(
@@ -58,6 +61,7 @@ export const bashTool = tool({
 	}),
 	contextSchema: z.object({
 		app: appDep,
+		session: sessionDep,
 		fileSystemManager: fileSystemManagerDep,
 		permissionGuard: permissionGuardDep,
 		readTracker: readTrackerDep,
@@ -69,6 +73,7 @@ export const bashTool = tool({
 	execute: async (params, { context, toolCallId, abortSignal }) => {
 		const {
 			app,
+			session,
 			fileSystemManager,
 			permissionGuard,
 			readTracker,
@@ -83,31 +88,94 @@ export const bashTool = tool({
 			)
 		}
 
-		const timeoutMs = getSettingsSnapshot?.()?.ai?.toolTimeoutMs
-		const result = await execVaultBash(app, params.script, {
+		const bashAccess = getSettingsSnapshot?.()?.ai?.bashAccess ?? 'deny'
+		if (bashAccess === 'deny') {
+			throw new Error('BASH_DISABLED: bash is disabled in settings.')
+		}
+		// AUD-03: `bashAccess` describes the configured gate; the actual
+		// authorization source (`once` / `session` / `always`) is only known
+		// after the guard returns, so resolve it before the execution audit.
+		let authorization: string = bashAccess
+		if (bashAccess === 'ask') {
+			if (!permissionGuard) {
+				throw new PermissionDeniedError(
+					'BASH_ACCESS_DENIED: permission guard unavailable.',
+				)
+			}
+			try {
+				authorization =
+					(await permissionGuard({
+						type: 'bash',
+						command: params.script,
+						purpose: params.purpose,
+					})) ?? 'once'
+			} catch (error) {
+				logger.info('Bash access denied', {
+					toolCallId,
+					sessionId: session.id,
+					access: 'denied',
+					requestedAccess: bashAccess,
+					purpose: params.purpose,
+					reason: error instanceof Error ? error.message : String(error),
+				})
+				throw error
+			}
+		}
+
+		logger.info('Bash execution audit', {
+			toolCallId,
+			sessionId: session.id,
+			access: authorization,
+			purpose: params.purpose,
 			cwd,
-			stdin: params.stdin,
-			rawScript: params.rawScript,
-			abortSignal,
-			timeoutMs,
-			heartbeatIntervalMs: 2000,
-			onHeartbeat: () => perfMetrics.recordBridgeCall('bash.heartbeat'),
-			permissionGuard: withPermissionPurpose(permissionGuard, params.purpose),
-			onRead: readTracker?.markRead.bind(readTracker),
-			getSettingsSnapshot,
-			updateSettings,
-			fileSystemManager,
+			scriptBytes: params.script.length,
 		})
+
+		const timeoutMs = getSettingsSnapshot?.()?.ai?.toolTimeoutMs
+		let result
+		try {
+			result = await execVaultBash(app, params.script, {
+				cwd,
+				stdin: params.stdin,
+				rawScript: params.rawScript,
+				abortSignal,
+				timeoutMs,
+				heartbeatIntervalMs: 2000,
+				onHeartbeat: () => perfMetrics.recordBridgeCall('bash.heartbeat'),
+				permissionGuard: undefined,
+				// The command was already authorized at the tool boundary above
+				// (bashAccess 'always', or 'ask' + the command-level approval).
+				// Declare that explicitly so the fail-closed vault FS keeps the
+				// 1.5.7 one-prompt-per-command model instead of denying writes.
+				unguardedWrite: 'bash-command',
+				onRead: readTracker?.markRead.bind(readTracker),
+				getSettingsSnapshot,
+				updateSettings,
+				fileSystemManager,
+			})
+		} catch (error) {
+			logger.info('Bash execution failed', {
+				toolCallId,
+				sessionId: session.id,
+				access: bashAccess,
+				purpose: params.purpose,
+				reason: error instanceof Error ? error.message : String(error),
+			})
+			throw error
+		}
 		const output = `${result.stdout}\n\n${result.stderr}`
 		recordMetadata?.(toolCallId, {
 			reversibleOps: result.reversibleOps,
 		})
-		if (output.length > MAX_INLINE_BASH_OUTPUT_CHARS) {
-			const outputPath = `${BASH_TMP_MOUNT_POINT}/${idAgent({ prefix: 'bash', words: 3 })}.txt`
-			await writeBashTmpText(app, outputPath, output)
-			return `Bash output was too long to return inline (${output.length} characters). The complete output was written to ${outputPath}. Use bash commands such as rg, sed, head, or tail to inspect it in smaller chunks.`
+		if (
+			new TextEncoder().encode(output).byteLength >
+			TOOL_OUTPUT_INLINE_BUDGET_BYTES
+		) {
+			return await retainToolOutputForModel(app.vault, session.id, output, {
+				toolName: 'bash',
+				toolCallId,
+			})
 		}
-
 		return output
 	},
 	toModelOutput: ({ output }) => ({

@@ -1,6 +1,6 @@
 import { Notice } from 'obsidian'
 import { createEffect, createSignal, For, Show } from 'solid-js'
-import { type fs } from '../fs'
+import { type fs } from '~/components/solid-js/WebDAVExplorer/fs'
 import File from './File'
 import Folder from './Folder'
 
@@ -16,6 +16,23 @@ export interface FileListProps {
 	onClick: (file: FileStat) => void
 }
 
+/**
+ * Returns a directory-first, name-sorted copy of `items`.
+ * `Array.prototype.sort` sorts in place, and `items` here is a reactive
+ * signal value, so the caller's array must never be mutated.
+ */
+export function sortedFileStats(items: FileStat[]): FileStat[] {
+	return [...items].sort((a, b) => {
+		if (a.isDir === b.isDir) {
+			return a.basename.localeCompare(b.basename, ['zh'])
+		}
+		if (a.isDir && !b.isDir) {
+			return -1
+		}
+		return 1
+	})
+}
+
 export function createFileList() {
 	const [version, setVersion] = createSignal(0)
 	return {
@@ -25,17 +42,7 @@ export function createFileList() {
 		FileList(props: FileListProps) {
 			const [items, setItems] = createSignal<FileStat[]>([])
 
-			const sortedItems = () =>
-				items().sort((a, b) => {
-					if (a.isDir === b.isDir) {
-						return a.basename.localeCompare(b.basename, ['zh'])
-					}
-					if (a.isDir && !b.isDir) {
-						return -1
-					} else {
-						return 1
-					}
-				})
+			const sortedItems = () => sortedFileStats(items())
 
 			async function refresh() {
 				try {

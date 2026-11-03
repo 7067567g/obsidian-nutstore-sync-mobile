@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { taskTool } from '~/ai/tools/task'
+import { taskTool } from './task'
 import type { TaskOrigin } from '~/ai/chat/runtime/master-turn-scheduler'
 
 describe('task tool execution context', () => {

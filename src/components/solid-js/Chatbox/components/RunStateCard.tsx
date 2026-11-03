@@ -1,7 +1,7 @@
 import { Show } from 'solid-js'
 import type { ChatboxProps } from '~/ai/chat/ui/types'
-import { t } from '../../i18n'
-import { runStateLabel } from '../utils'
+import { t } from '~/components/solid-js/i18n'
+import { runStateLabel } from '~/components/solid-js/Chatbox/utils'
 
 export function RunStateCard(props: {
 	runState: ChatboxProps['runState']

@@ -97,6 +97,21 @@ export default defineConfig([
 		},
 	},
 
+	// Import style: cross-directory modules use the `~` alias, same-directory
+	// modules stay relative (`./`). `no-relative-parent-imports` forbids the
+	// `../` forms that used to be mixed with `~` across the tree. The esbuild
+	// config test intentionally imports `../esbuild.config.mjs`, which lives
+	// outside `src/` and cannot be expressed with the `~` alias. The `import`
+	// plugin itself is registered by eslint-plugin-obsidianmd's recommended
+	// config, so this block only opts into the rule.
+	{
+		files: ['src/**/*.{ts,tsx}'],
+		ignores: ['src/esbuild-config.test.ts'],
+		rules: {
+			'import/no-relative-parent-imports': 'error',
+		},
+	},
+
 	// Tooling executes in Node, not in Obsidian's browser-like runtime.
 	{
 		files: nodeFiles,
@@ -133,9 +148,6 @@ export default defineConfig([
 			'no-undef': 'off',
 
 			'@typescript-eslint/no-unused-vars': 'off',
-			'@typescript-eslint/no-unsafe-assignment': 'off',
-			'@typescript-eslint/no-unsafe-argument': 'off',
-			'@typescript-eslint/no-misused-promises': 'off',
 
 			'unused-imports/no-unused-imports': 'error',
 			'unused-imports/no-unused-vars': [
@@ -169,6 +181,13 @@ export default defineConfig([
 		},
 	},
 
+	// CODE-03 ratchet (R6, 2026-10-25): no-unsafe-assignment /
+	// no-unsafe-argument / no-misused-promises are no longer disabled globally
+	// and are no longer pinned per file. They apply to every non-test
+	// TypeScript file; tests keep only the documented relaxations below.
+	// eslint-suppressions.json is gone on purpose: if a new violation appears,
+	// fix the call site or narrow the type at the boundary instead of adding a
+	// blanket `off` or a bulk suppression entry.
 	// Tests intentionally trade some static strictness for practical mocking
 	// and compatibility assertions.
 	{

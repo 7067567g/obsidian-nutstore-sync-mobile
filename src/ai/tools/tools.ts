@@ -4,6 +4,7 @@ import { settingsPatchTool, settingsReadTool } from './settings-tools'
 import { todoWriteTool } from './todowrite'
 import { updateSessionTitleTool } from './update-session-title'
 import { taskTool } from './task'
+import { memoryTool } from './memory'
 import { vaultBatchEditTool } from './vault-batch-edit'
 import { vaultFrontmatterTool } from './vault-frontmatter'
 import { vaultGrepTool } from './vault-grep'
@@ -20,6 +21,8 @@ export interface CreateAIToolsOptions {
 	allowSpawn?: boolean
 	enableTodoWrite?: boolean
 	enableViewImage?: boolean
+	/** Default false keeps bash unavailable until the user opts in. */
+	enableBash?: boolean
 }
 
 export function createAITools(options: CreateAIToolsOptions = {}) {
@@ -39,7 +42,8 @@ export function createAITools(options: CreateAIToolsOptions = {}) {
 		...(options.enableTodoWrite ? { todowrite: todoWriteTool } : {}),
 		update_session_title: updateSessionTitleTool,
 		apply_patch: applyPatchTool,
-		bash: bashTool,
+		memory: memoryTool,
+		...(options.enableBash === false ? {} : { bash: bashTool }),
 		...(options.enableViewImage ? { view_image: viewImageTool } : {}),
 		...(options.allowSpawn !== false ? { task: taskTool } : {}),
 	}

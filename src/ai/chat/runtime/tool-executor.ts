@@ -12,8 +12,8 @@ import {
 import { getMasterAgent } from '~/ai/chat/domain'
 import { deriveTitle } from '~/ai/chat/messages/message-utils'
 import { MAX_TASK_DEPTH } from '~/ai/chat/prompts'
-import type { ChatState } from '~/ai/chat/runtime/chat-state'
-import type { RuntimeStates } from '~/ai/chat/runtime/runtime-state'
+import type { ChatState } from './chat-state'
+import type { RuntimeStates } from './runtime-state'
 import { resolveChatModalMountTarget } from '~/ai/chat/ui/modal-mount'
 import type { AIModelConfig } from '~/ai/core/types'
 import {
@@ -40,6 +40,8 @@ export interface StableToolsContext {
 	app: App
 	fileSystemManager: VaultFileSystemManager
 	permissionGuard?: PermissionGuard
+	/** Dedicated bash gate; keeps explicit bashAccess=ask from being bypassed by yolo/full access. */
+	bashPermissionGuard?: PermissionGuard
 	dispatchTask?: DispatchTaskFn
 	dispatchableDefinitions?: readonly AgentDefinition[]
 	getSettingsSnapshot?: SettingsSnapshotFn
@@ -107,11 +109,12 @@ export class ToolExecutor {
 		session?: ChatSession,
 		model?: AIModelConfig,
 	) {
-		const allowSpawn = depth < MAX_TASK_DEPTH
+		const allowSpawn = depth < (definition.maxTaskDepth ?? MAX_TASK_DEPTH)
 		const tools = createAITools({
 			allowSpawn,
 			enableTodoWrite: depth === 0,
 			enableViewImage: model?.modalities.input.includes('image') ?? false,
+			enableBash: (this.getSettings().bashAccess ?? 'deny') !== 'deny',
 		})
 		if (definition.id === MASTER_AGENT_ID) {
 			await this.mcpService.refreshIfChanged()
@@ -132,35 +135,48 @@ export class ToolExecutor {
 		session: ChatSession,
 		definition: AgentDefinition,
 	): StableToolsContext {
+		const createInteractivePermissionGuard = () =>
+			createPermissionGuard(
+				this.app,
+				{
+					has: (signature) =>
+						this.runtimeStates
+							.getAutoApproveRequests(session.id)
+							.has(signature),
+					add: (signature) => {
+						this.runtimeStates.getAutoApproveRequests(session.id).add(signature)
+					},
+				},
+				{
+					sessionTitle:
+						this.state.sessionIndex.find((item) => item.id === session.id)
+							?.title || deriveTitle(session),
+					modalMountTarget: this.getChatModalMountTarget(),
+					onAlwaysAllow: async () => {
+						await this.settingsIo.updateSettings({
+							bashAccess: 'always',
+						})
+					},
+				},
+			)
 		const permissionGuard =
 			definition.permissionMode === 'readonly'
 				? createReadonlyPermissionGuard()
 				: definition.permissionMode === 'full'
 					? createFullAccessPermissionGuard()
-					: createPermissionGuard(
-							this.app,
-							{
-								has: (signature) =>
-									this.runtimeStates
-										.getAutoApproveRequests(session.id)
-										.has(signature),
-								add: (signature) => {
-									this.runtimeStates
-										.getAutoApproveRequests(session.id)
-										.add(signature)
-								},
-							},
-							{
-								sessionTitle:
-									this.state.sessionIndex.find((item) => item.id === session.id)
-										?.title || deriveTitle(session),
-								modalMountTarget: this.getChatModalMountTarget(),
-							},
-						)
+					: createInteractivePermissionGuard()
+		const bashAccess = this.getSettings().bashAccess ?? 'deny'
+		const bashPermissionGuard =
+			definition.permissionMode === 'readonly'
+				? createReadonlyPermissionGuard()
+				: definition.permissionMode === 'full' && bashAccess === 'ask'
+					? createInteractivePermissionGuard()
+					: permissionGuard
 		return {
 			app: this.app,
 			fileSystemManager: this.fileSystemManager,
 			permissionGuard,
+			bashPermissionGuard,
 			dispatchTask: (params, origin) =>
 				this.dispatchTaskHandler(params, origin),
 			dispatchableDefinitions: listDispatchableDefinitions({

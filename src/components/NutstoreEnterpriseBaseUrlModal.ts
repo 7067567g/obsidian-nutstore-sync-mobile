@@ -4,7 +4,7 @@ import {
 	NutstoreBaseUrlValidationError,
 	normalizeNutstoreBaseUrl,
 } from '~/utils/nutstore-endpoints'
-import type NutstorePlugin from '..'
+import type NutstorePlugin from '~/index'
 
 export default class NutstoreEnterpriseBaseUrlModal extends Modal {
 	constructor(private plugin: NutstorePlugin) {

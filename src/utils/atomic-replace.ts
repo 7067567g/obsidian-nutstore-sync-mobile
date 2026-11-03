@@ -27,13 +27,130 @@ async function adapterExists(vault: Vault, path: string) {
 	}
 }
 
-async function bestEffortRemove(vault: Vault, path: string) {
+async function bestEffortRemove(vault: Vault, path: string): Promise<boolean> {
 	try {
 		if (await adapterExists(vault, path)) {
 			await vault.adapter.remove(path)
 		}
+		return true
 	} catch {
-		/* best effort */
+		return false
+	}
+}
+
+/**
+ * R2b / S4: targets whose previous atomic replace could not clean up its backup
+ * (failed restore or failed removal). Only these paths pay for a directory
+ * listing on the next write; a fresh process has an empty set and relies on the
+ * startup scan (`recoverOrphanedBackups`) instead of scanning on every write.
+ */
+const pendingOrphanRecovery = new WeakMap<Vault, Set<string>>()
+
+function markPendingOrphanRecovery(vault: Vault, target: string) {
+	let targets = pendingOrphanRecovery.get(vault)
+	if (!targets) {
+		targets = new Set()
+		pendingOrphanRecovery.set(vault, targets)
+	}
+	targets.add(target)
+}
+
+/**
+ * Consume the "marker" for a target. Returns true only when a previous write for
+ * this exact target left a backup behind, so the hot path can skip the scan.
+ */
+function consumePendingOrphanRecovery(vault: Vault, target: string): boolean {
+	const targets = pendingOrphanRecovery.get(vault)
+	if (!targets?.has(target)) return false
+	targets.delete(target)
+	return true
+}
+
+/**
+ * Restore (or drop) backup siblings left behind by a crash between the
+ * target→backup and temp→target renames. Callers can invoke this on startup
+ * for a directory: an orphan backup whose target is missing is renamed back
+ * into place, a backup whose target is present is treated as stale and
+ * removed. Returns the number of targets restored.
+ *
+ * All failures are swallowed — recovery is best effort and must never block
+ * plugin startup.
+ */
+export async function recoverOrphanedBackups(
+	vault: Vault,
+	directory: string,
+): Promise<number> {
+	const normalizedDirectory = normalizePath(directory)
+	let files: string[]
+	try {
+		const listed = await vault.adapter.list(normalizedDirectory)
+		files = listed.files ?? []
+	} catch {
+		return 0
+	}
+	let recovered = 0
+	for (const file of files) {
+		const normalizedFile = normalizePath(file)
+		const slash = normalizedFile.lastIndexOf('/')
+		const parent = slash >= 0 ? normalizedFile.slice(0, slash) : ''
+		if (parent !== normalizedDirectory) continue
+		const name = normalizedFile.slice(slash + 1)
+		const markerIndex = name.lastIndexOf(ATOMIC_BACKUP_MARKER)
+		if (markerIndex <= 0) continue
+		const targetName = name.slice(0, markerIndex)
+		if (!targetName) continue
+		const targetPath = normalizePath(
+			`${parent ? `${parent}/` : ''}${targetName}`,
+		)
+		try {
+			if (await adapterExists(vault, targetPath)) {
+				await bestEffortRemove(vault, normalizedFile)
+			} else {
+				await vault.adapter.rename(normalizedFile, targetPath)
+				recovered += 1
+			}
+		} catch {
+			/* best effort recovery */
+		}
+	}
+	return recovered
+}
+
+/**
+ * Self-healing variant scoped to one target path. Before installing a new
+ * copy we reconcile leftover backups for the same target: restore one when
+ * the target is missing (crash window), drop the rest as stale.
+ */
+async function recoverOrphanedBackupsForTarget(
+	vault: Vault,
+	normalizedTarget: string,
+): Promise<void> {
+	const directory = dirname(normalizedTarget)
+	let files: string[]
+	try {
+		const listed = await vault.adapter.list(normalizePath(directory))
+		files = listed.files ?? []
+	} catch {
+		return
+	}
+	const prefix = `${normalizedTarget}${ATOMIC_BACKUP_MARKER}`
+	const backups = files
+		.map((file) => normalizePath(file))
+		.filter((file) => file.startsWith(prefix) && file.length > prefix.length)
+	if (backups.length === 0) return
+	const targetExists = await adapterExists(vault, normalizedTarget)
+	let restored = false
+	for (const backup of backups) {
+		try {
+			if (!targetExists && !restored) {
+				await vault.adapter.rename(backup, normalizedTarget)
+				restored = true
+			} else {
+				await vault.adapter.remove(backup)
+			}
+		} catch {
+			/* best effort recovery */
+		}
 	}
 }
 
@@ -55,6 +172,14 @@ export async function atomicReplaceFromTemp(
 		throw new Error(`Atomic replace temp file not found: ${normalizedTemp}`)
 	}
 
+	// R2b / S4: heal an orphaned backup from a previous crash only when this
+	// process recorded one (failed restore/cleanup for this target) — the
+	// unconditional `list` here was paid by every write. A fresh process relies
+	// on the one-shot startup scan (`recoverPendingTemps` → this module's
+	// `recoverOrphanedBackups`).
+	if (consumePendingOrphanRecovery(vault, normalizedTarget)) {
+		await recoverOrphanedBackupsForTarget(vault, normalizedTarget)
+	}
 	await mkdirsVault(vault, dirname(normalizedTarget))
 	const backupPath = siblingPath(
 		normalizedTarget,
@@ -80,14 +205,17 @@ export async function atomicReplaceFromTemp(
 				await vault.adapter.rename(backupPath, normalizedTarget)
 				backupCreated = false
 			} catch {
-				// Preserve the original error; a manual recovery may be needed.
+				// Preserve the original error; the next write for this target runs
+				// the targeted recovery scan because of this marker.
+				markPendingOrphanRecovery(vault, normalizedTarget)
 			}
 		}
 		throw error
 	} finally {
 		if (installed) {
-			await bestEffortRemove(vault, backupPath)
+			const removed = await bestEffortRemove(vault, backupPath)
 			await bestEffortRemove(vault, normalizedTemp)
+			if (!removed) markPendingOrphanRecovery(vault, normalizedTarget)
 		}
 	}
 }

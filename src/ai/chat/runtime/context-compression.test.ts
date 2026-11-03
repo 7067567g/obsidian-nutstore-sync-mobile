@@ -15,7 +15,7 @@ import {
 	runContextCompression,
 	shouldAutoCompressAgent,
 	shouldStartContextCompaction,
-} from '~/ai/chat/runtime/context-compression'
+} from './context-compression'
 import { COMPRESSION_PROMPT } from '~/ai/chat/prompts'
 import type { AppUIMessage } from '~/ai/chat/types'
 
@@ -378,6 +378,62 @@ describe('context compression', () => {
 		).toBe(true)
 	})
 
+	it('falls back to the local estimate when the provider omits usage', () => {
+		const agent = createEmptyMasterAgent(1)
+		agent.timeline = [
+			{
+				...message('long-user', 'user', 1),
+				parts: [{ type: 'text', text: '中'.repeat(240_000) }],
+			},
+		]
+		const model = { limit: { context: 128_000 } } as never
+
+		// Regression: with no provider usage anywhere on the timeline, pressure
+		// used to be pinned at `normal` and auto-compression never fired.
+		expect(resolveContextPressure(agent, model)).toBe('hard')
+		expect(shouldAutoCompressAgent(agent, model)).toBe(true)
+	})
+
+	it('pays the wider margin before trusting a local estimate', () => {
+		const agent = createEmptyMasterAgent(1)
+		// ~110k estimated tokens clears the fallback-adjusted hard limit
+		// (128k - 6.4k base margin - 12.8k fallback margin = 108.8k) but would
+		// still be `normal` against the narrower provider-path limit, proving
+		// the estimate keeps extra headroom for its own error.
+		agent.timeline = [
+			{
+				...message('long-user', 'user', 1),
+				parts: [{ type: 'text', text: '中'.repeat(220_000) }],
+			},
+		]
+		expect(
+			resolveContextPressure(agent, { limit: { context: 128_000 } } as never),
+		).toBe('hard')
+	})
+
+	it('prefers reported usage over the local estimate', () => {
+		const agent = createEmptyMasterAgent(1)
+		const reported = message('assistant', 'assistant', 2)
+		reported.metadata!.llm = {
+			usage: {
+				inputTokens: 1_000,
+				outputTokens: 0,
+				totalTokens: 1_000,
+			} as never,
+		}
+		agent.timeline = [
+			{
+				...message('long-user', 'user', 1),
+				parts: [{ type: 'text', text: '中'.repeat(240_000) }],
+			},
+			reported,
+		]
+
+		expect(
+			resolveContextPressure(agent, { limit: { context: 128_000 } } as never),
+		).toBe('normal')
+	})
+
 	it('rejects a summary that does not shrink the compacted range', async () => {
 		generateText.mockResolvedValueOnce({ text: 'x'.repeat(2000) })
 		const plan = {
@@ -444,6 +500,89 @@ describe('context compression', () => {
 		const serialized = JSON.stringify(request.messages)
 		expect(serialized).toContain('tool result middle omitted')
 		expect(serialized).not.toContain('x'.repeat(20_000))
+	})
+
+	it('uses the deterministic backend without calling the model', async () => {
+		const plan = {
+			summarizedThroughMessageId: 'assistant-1',
+			sourceMessageIds: ['user-1', 'assistant-1'],
+			retainedMessageIds: [],
+			messages: [
+				{
+					id: 'user-1',
+					role: 'user',
+					metadata: { createdAt: 1 },
+					parts: [{ type: 'text', text: '请整理中文笔记 ' + 'x'.repeat(2000) }],
+				},
+				{
+					id: 'assistant-1',
+					role: 'assistant',
+					metadata: { createdAt: 2 },
+					parts: [{ type: 'text', text: '已读取 notes/中文.md' }],
+				},
+			],
+		}
+
+		const summary = await generateContextCompression({
+			backend: 'deterministic',
+			provider: {} as never,
+			model: { id: 'model' } as never,
+			session: {} as never,
+			plan: plan as never,
+		})
+
+		expect(summary).toBeDefined()
+		expect(summary).toContain('## User Goals')
+		expect(summary).toContain('请整理中文笔记')
+		expect(summary).toContain('notes/中文.md')
+		expect(generateText).not.toHaveBeenCalled()
+	})
+
+	it('folds duplicate tool outputs in the llm summary copy only', async () => {
+		generateText.mockResolvedValueOnce({ text: 'short summary' })
+		const duplicatePart = {
+			type: 'dynamic-tool',
+			toolName: 'vault_read',
+			toolCallId: 'call',
+			state: 'output-available',
+			input: { path: 'notes/a.md' },
+			output: 'old output',
+		}
+		const plan = {
+			summarizedThroughMessageId: 'tool-2',
+			sourceMessageIds: ['tool-1', 'tool-2'],
+			retainedMessageIds: [],
+			messages: [
+				{
+					id: 'tool-1',
+					role: 'assistant',
+					metadata: { createdAt: 1 },
+					parts: [duplicatePart],
+				},
+				{
+					id: 'tool-2',
+					role: 'assistant',
+					metadata: { createdAt: 2 },
+					parts: [{ ...duplicatePart, toolCallId: 'call-2' }],
+				},
+			],
+		}
+
+		const summary = await generateContextCompression({
+			provider: {} as never,
+			model: { id: 'model' } as never,
+			session: {} as never,
+			plan: plan as never,
+			tools: {} as never,
+		})
+
+		expect(summary).toBe('short summary')
+		const request = generateText.mock.calls.at(-1)?.[0] as {
+			messages: unknown[]
+		}
+		expect(JSON.stringify(request.messages)).toContain(
+			'duplicate tool result omitted',
+		)
 	})
 
 	it('forwards shared tool schemas but never execution or tool context to the summarizer', async () => {

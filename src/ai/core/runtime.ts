@@ -1,5 +1,6 @@
 import type { FilePart, ModelMessage, TextPart, UserModelMessage } from 'ai'
-import { getProviderResolver } from '../providers/registry'
+import { getProviderResolver } from '~/ai/providers/registry'
+import type { ProviderRequestContext } from '~/ai/transport/provider-fetch'
 import {
 	AIModelConfig,
 	AIModelProviderOverride,
@@ -23,6 +24,7 @@ function resolveEffectiveProviderConfig(
 export function resolveLanguageModel(
 	provider: AIProviderConfig,
 	modelId: string,
+	context: ProviderRequestContext = {},
 ) {
 	const modelConfig = provider.models[modelId]
 	const effectiveProvider = resolveEffectiveProviderConfig(
@@ -30,7 +32,7 @@ export function resolveLanguageModel(
 		modelConfig?.provider,
 	)
 	const resolver = getProviderResolver(effectiveProvider)
-	return resolver.createLanguageModel(effectiveProvider, modelId)
+	return resolver.createLanguageModel(effectiveProvider, modelId, context)
 }
 
 function inferFilePartModality(

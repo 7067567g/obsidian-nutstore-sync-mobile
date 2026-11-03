@@ -1,28 +1,13 @@
 import { normalizePath, requestUrl, TFile, Vault } from 'obsidian'
-import type {
-	AppUIMessage,
-	ChatDisplayBlock,
-	ChatDisplayContentBlock,
-} from '~/ai/chat/types'
 import { v7 as uuidv7 } from 'uuid'
 import type { ChatSession } from '~/ai/chat/domain'
-import {
-	formatUserContext,
-	type UserContextItem,
-} from '~/ai/chat/context/user-context'
-import {
-	imageFilePartSrc,
-	isImageFilePart,
-} from '~/ai/chat/messages/message-utils'
+import type { UserContextItem } from '~/ai/chat/context/user-context'
+import { imageFilePartSrc } from './message-utils'
 import type { FilePart } from 'ai'
-import { projectTimelineMessageGroups } from '~/ai/chat/ui/display-blocks'
-import { getUserContextItems } from '~/ai/chat/messages/ui-message'
-import { getMasterAgent } from '~/ai/chat/domain'
-import i18n from '~/i18n'
 import { writeLocalBinary, writeLocalText } from '~/utils/local-vault-io'
 import logger from '~/utils/logger'
 import { mkdirsVault } from '~/utils/mkdirs-vault'
-import { formatDuration } from '~/utils/format-duration'
+import { buildSessionMarkdown } from './export-session-render'
 
 interface ExportSessionParams {
 	vault: Vault
@@ -72,14 +57,6 @@ export function sanitizeExportFileName(input: string) {
 		'',
 	)
 	return truncated || 'chat-session'
-}
-
-function toMarkdownHeadingText(value: string) {
-	return value.replace(/\r?\n/g, ' ').trim()
-}
-
-function toYamlKeyLabel(value: string) {
-	return /^[A-Za-z0-9_-]+$/.test(value) ? value : JSON.stringify(value)
 }
 
 function imageExtFromMimeType(mimeType: string | undefined) {
@@ -154,13 +131,14 @@ async function resolveImageArrayBuffer(imagePart: FilePart) {
 	}
 }
 
+const MAX_UNIQUE_EXPORT_PATH_ATTEMPTS = 1000
+
 function resolveUniqueExportPath(
 	vault: Vault,
 	directoryPath: string,
 	baseFileName: string,
 ) {
-	let index = 0
-	while (true) {
+	for (let index = 0; index < MAX_UNIQUE_EXPORT_PATH_ATTEMPTS; index += 1) {
 		const suffix = index === 0 ? '' : `-${index + 1}`
 		const fileStem = `${baseFileName}${suffix}`
 		const filePath = normalizePath(`${directoryPath}/${fileStem}.md`)
@@ -168,8 +146,10 @@ function resolveUniqueExportPath(
 		if (!existing) {
 			return filePath
 		}
-		index += 1
 	}
+	throw new Error(
+		`Unable to resolve a unique export path for '${baseFileName}' after ${MAX_UNIQUE_EXPORT_PATH_ATTEMPTS} attempts`,
+	)
 }
 
 async function saveExportImage(
@@ -214,295 +194,6 @@ async function saveExportUserContextImage(
 	}
 }
 
-async function buildMessageContentMarkdown(
-	vault: Vault,
-	content: ChatDisplayContentBlock['parts'],
-	assetsDirPath: string,
-	assetsMarkdownPrefix: string,
-) {
-	const lines: string[] = []
-	for (const part of content) {
-		if (part.type === 'text') {
-			const text = part.text.trim()
-			if (text) lines.push(text)
-			continue
-		}
-		if (!isImageFilePart(part)) continue
-		const imageRef = await saveExportImage(
-			vault,
-			part,
-			assetsDirPath,
-			assetsMarkdownPrefix,
-		)
-		if (!imageRef) continue
-		lines.push(`![](${imageRef})`)
-	}
-	return lines
-}
-
-async function buildUserContextMarkdown(
-	vault: Vault,
-	record: AppUIMessage,
-	assetsDirPath: string,
-	assetsMarkdownPrefix: string,
-) {
-	const userContext = getUserContextItems(record)
-	if (!userContext.length) {
-		return []
-	}
-	const lines: string[] = []
-	const textContext = userContext.filter(
-		(item) => item.type === 'vault-path' || item.type === 'selection',
-	)
-	if (textContext.length) {
-		lines.push(formatUserContext(textContext), '')
-	}
-	for (const item of userContext) {
-		if (item.type === 'image') {
-			const imageRef = await saveExportUserContextImage(
-				vault,
-				item,
-				assetsDirPath,
-				assetsMarkdownPrefix,
-			)
-			if (imageRef) {
-				lines.push(`![](${imageRef})`, '')
-			}
-			continue
-		}
-		if (item.type !== 'file') {
-			continue
-		}
-		const truncated = item.size > 64 * 1024
-		const blob = truncated ? item.blob.slice(0, 64 * 1024) : item.blob
-		const content = await blob.text()
-		lines.push(
-			[
-				'<UserProvidedFile>',
-				JSON.stringify(
-					{
-						type: 'file',
-						filename: item.filename,
-						mimeType: item.mimeType,
-						size: item.size,
-						truncated,
-						content,
-					},
-					null,
-					2,
-				),
-				'</UserProvidedFile>',
-			].join('\n'),
-			'',
-		)
-	}
-	return lines
-}
-
-function getModelLabel(session: ChatSession, record: AppUIMessage) {
-	const sessionModel =
-		session.model?.providerId && session.model?.modelId
-			? `${session.model.providerId}/${session.model.modelId}`
-			: undefined
-	const metaModel =
-		record.metadata?.llm?.modelName || record.metadata?.llm?.modelId
-	const metaProvider =
-		record.metadata?.llm?.providerName || record.metadata?.llm?.providerId
-	return metaModel && metaProvider
-		? `${metaProvider}/${metaModel}`
-		: metaModel || metaProvider || sessionModel || 'unknown-model'
-}
-
-function getBlockHeadingLabel(
-	session: ChatSession,
-	record: AppUIMessage,
-	block: ChatDisplayBlock,
-) {
-	if (block.kind === 'system-notification') {
-		return `🔔 ${i18n.t('chatbox.exportRole.systemNotification')}`
-	}
-	if (record.role === 'user') {
-		return `👤 ${i18n.t('chatbox.exportRole.user')}`
-	}
-	if (record.role === 'assistant') {
-		const modelLabel = getModelLabel(session, record)
-		const emoji = block.kind === 'tool-call' ? '🔧' : '🤖'
-		return `${emoji} ${modelLabel}`
-	}
-	return `🛠 ${i18n.t('chatbox.exportRole.tool')}`
-}
-
-async function buildDisplayBlockMarkdown(
-	vault: Vault,
-	block: ChatDisplayBlock,
-	assetsDirPath: string,
-	assetsMarkdownPrefix: string,
-) {
-	if (block.kind === 'content') {
-		return buildMessageContentMarkdown(
-			vault,
-			block.parts,
-			assetsDirPath,
-			assetsMarkdownPrefix,
-		)
-	}
-	if (block.kind === 'reasoning') {
-		const text = block.part.text.trim()
-		return text ? [`> ${text.replace(/\n/g, '\n> ')}`] : []
-	}
-	if (block.kind === 'system-notification') {
-		return ['```json', JSON.stringify(block.notification, null, 2), '```']
-	}
-	const lines = [
-		`- ${i18n.t('chatbox.exportMeta.toolName')}: \`${block.toolCall.toolName}\``,
-		`- ${i18n.t('chatbox.exportMeta.toolCallId')}: \`${block.toolCall.toolCallId}\``,
-		...(block.timing
-			? [
-					`- ${i18n.t('chatbox.exportMeta.duration')}: \`${formatDuration((block.timing.finishedAt ?? Date.now()) - block.timing.startedAt)}\``,
-				]
-			: []),
-	]
-	const todos = block.todos
-	if (block.toolCall.toolName === 'todowrite' && todos) {
-		lines.push('')
-		for (const todo of todos) {
-			const checked =
-				todo.status === 'completed'
-					? 'x'
-					: todo.status === 'cancelled'
-						? '-'
-						: ' '
-			lines.push(`- [${checked}] ${todo.content}`)
-		}
-		if (todos.length === 0) {
-			lines.push(`- ${i18n.t('chatbox.ui.states.todoEmpty')}`)
-		}
-		return lines
-	}
-	lines.push(
-		'',
-		'```json',
-		JSON.stringify(block.toolCall.input ?? {}, null, 2),
-		'```',
-	)
-	if (block.toolCall.state === 'output-available') {
-		lines.push(
-			'',
-			'```text',
-			typeof block.toolCall.output === 'string'
-				? block.toolCall.output
-				: JSON.stringify(block.toolCall.output, null, 2),
-			'```',
-		)
-	} else if (block.toolCall.state === 'output-error') {
-		lines.push('', '```text', block.toolCall.errorText, '```')
-	}
-	return lines
-}
-
-async function buildSessionMarkdown(
-	vault: Vault,
-	session: ChatSession,
-	title: string,
-	includeToolMessages: boolean,
-	manifestVersion: string,
-	assetsDirPath: string,
-	assetsMarkdownPrefix: string,
-) {
-	const sessionModel =
-		session.model?.providerId && session.model?.modelId
-			? `${session.model.providerId}/${session.model.modelId}`
-			: undefined
-	const frontmatter = {
-		title: i18n.t('chatbox.exportFrontmatter.title'),
-		sessionId: i18n.t('chatbox.exportFrontmatter.sessionId'),
-		exportedAt: i18n.t('chatbox.exportFrontmatter.exportedAt'),
-		createdAt: i18n.t('chatbox.exportFrontmatter.createdAt'),
-		updatedAt: i18n.t('chatbox.exportFrontmatter.updatedAt'),
-		model: i18n.t('chatbox.exportFrontmatter.model'),
-		includeToolMessages: i18n.t(
-			'chatbox.exportFrontmatter.includeToolMessages',
-		),
-		pluginVersion: i18n.t('chatbox.exportFrontmatter.pluginVersion'),
-	}
-	const lines: string[] = [
-		'---',
-		`${toYamlKeyLabel(frontmatter.title)}: ${JSON.stringify(toMarkdownHeadingText(title))}`,
-		`${toYamlKeyLabel(frontmatter.sessionId)}: ${JSON.stringify(session.id)}`,
-		`${toYamlKeyLabel(frontmatter.exportedAt)}: ${JSON.stringify(new Date().toLocaleString())}`,
-		`${toYamlKeyLabel(frontmatter.createdAt)}: ${JSON.stringify(new Date(session.createdAt).toLocaleString())}`,
-		`${toYamlKeyLabel(frontmatter.updatedAt)}: ${JSON.stringify(new Date(session.updatedAt).toLocaleString())}`,
-		`${toYamlKeyLabel(frontmatter.model)}: ${JSON.stringify(sessionModel || null)}`,
-		`${toYamlKeyLabel(frontmatter.includeToolMessages)}: ${includeToolMessages ? 'true' : 'false'}`,
-		`${toYamlKeyLabel(frontmatter.pluginVersion)}: ${JSON.stringify(manifestVersion)}`,
-		'---',
-		'',
-		`# ${toMarkdownHeadingText(title)}`,
-		'',
-	]
-
-	const masterAgent = getMasterAgent(session)
-	for (const { message: record, blocks } of projectTimelineMessageGroups(
-		masterAgent.timeline,
-		masterAgent.toolTimings,
-	)) {
-		const userContextLines =
-			record.role === 'user'
-				? await buildUserContextMarkdown(
-						vault,
-						record,
-						assetsDirPath,
-						assetsMarkdownPrefix,
-					)
-				: []
-		if (blocks.length === 0) {
-			lines.push(
-				`### ${record.role === 'user' ? `👤 ${i18n.t('chatbox.exportRole.user')}` : getModelLabel(session, record)}`,
-				'',
-				`${i18n.t('chatbox.exportMeta.messageTime')}: ${new Date(record.metadata?.createdAt ?? session.createdAt).toLocaleString()}`,
-				'',
-			)
-			if (userContextLines.length > 0) {
-				lines.push(...userContextLines)
-			} else {
-				lines.push(i18n.t('chatbox.exportMeta.emptyContent'), '')
-			}
-			continue
-		}
-		let appendedUserContext = false
-		for (const block of blocks) {
-			if (!includeToolMessages && block.kind === 'tool-call') {
-				continue
-			}
-			lines.push(`### ${getBlockHeadingLabel(session, record, block)}`, '')
-			lines.push(
-				`${i18n.t('chatbox.exportMeta.messageTime')}: ${new Date(record.metadata?.createdAt ?? session.createdAt).toLocaleString()}`,
-				'',
-			)
-			const blockLines = await buildDisplayBlockMarkdown(
-				vault,
-				block,
-				assetsDirPath,
-				assetsMarkdownPrefix,
-			)
-			if (blockLines.length > 0) {
-				lines.push(...blockLines, '')
-			}
-			if (!appendedUserContext && userContextLines.length > 0) {
-				lines.push(...userContextLines)
-				appendedUserContext = true
-			}
-			if (blockLines.length === 0 && record.role !== 'assistant') {
-				if (!appendedUserContext) {
-					lines.push(i18n.t('chatbox.exportMeta.emptyContent'), '')
-				}
-			}
-		}
-	}
-
-	return `${lines.join('\n').trim()}\n`
-}
-
 export async function exportSessionToMarkdownFile(params: ExportSessionParams) {
 	const exportDirPath = normalizePath(`${params.manifestId}/conversations`)
 	await mkdirsVault(params.vault, exportDirPath)
@@ -525,6 +216,7 @@ export async function exportSessionToMarkdownFile(params: ExportSessionParams) {
 		params.manifestVersion,
 		assetsDirPath,
 		assetsMarkdownPrefix,
+		{ saveExportImage, saveExportUserContextImage },
 	)
 	await writeLocalText(params.vault, filePath, markdown)
 	const file = params.vault.getAbstractFileByPath(filePath)

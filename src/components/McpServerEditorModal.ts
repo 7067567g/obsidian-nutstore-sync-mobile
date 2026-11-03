@@ -4,7 +4,7 @@ import { type HttpMcpServerConfig, isValidMcpServerName } from '~/ai/mcp/types'
 import i18n from '~/i18n'
 import { addClassTokens } from '~/utils/class-tokens'
 import logger from '~/utils/logger'
-import type NutstorePlugin from '..'
+import type NutstorePlugin from '~/index'
 
 export interface McpServerDraft {
 	name: string

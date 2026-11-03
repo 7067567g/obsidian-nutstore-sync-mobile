@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ChatSession } from '~/ai/chat/domain'
-import { ChatState } from '~/ai/chat/runtime/chat-state'
-import { createEmptyMasterAgent } from '~/ai/chat/messages/ui-message'
-import { RuntimeStates } from '~/ai/chat/runtime/runtime-state'
-import { SessionProcessor } from '~/ai/chat/runtime/session-processor'
-import { createMasterTurnScheduler } from '~/ai/chat/runtime/master-turn-scheduler'
+import { ChatState } from './chat-state'
+import {
+	createEmptyMasterAgent,
+	finalizeAbortedToolCalls,
+} from '~/ai/chat/messages/ui-message'
+import { RuntimeStates } from './runtime-state'
+import { SessionProcessor } from './session-processor'
+import { createMasterTurnScheduler } from './master-turn-scheduler'
 import type { AppUIMessage } from '~/ai/chat/types'
 
 const TEXT_ONE = 'Hello 你好 🌿 one'
@@ -59,7 +62,8 @@ function createHarness(
 		getActiveAgent: () => master,
 		appendUserMessage,
 		appendAgentInput: vi.fn(() => true),
-		removeIncompleteToolCalls: vi.fn(() => false),
+		abortIncompleteToolCalls: vi.fn(() => false),
+		failIncompleteToolCalls: vi.fn((_agent: unknown) => false),
 		reportFatalError: vi.fn(),
 	}
 	const messageOps = {
@@ -118,6 +122,53 @@ function createHarness(
 }
 
 describe('SessionProcessor master turn worker', () => {
+	it('cancels one queued submission and coalesces the surviving neighbors', async () => {
+		let callCount = 0
+		const runTurn = vi.fn(({ abortSignal }: { abortSignal?: AbortSignal }) => {
+			callCount += 1
+			if (callCount === 1) {
+				return new Promise((_, reject) => {
+					abortSignal?.addEventListener(
+						'abort',
+						() => reject(new Error('test abort')),
+						{ once: true },
+					)
+				})
+			}
+			return Promise.resolve({ status: 'completed', text: TEXT_TWO })
+		})
+		const { master, processor, runtime } = createHarness(runTurn)
+
+		processor.enqueueUserSubmission('session', {
+			text: 'A',
+			userContext: [],
+		})
+		await vi.waitFor(() => expect(runTurn).toHaveBeenCalledTimes(1))
+		processor.enqueueUserSubmission('session', {
+			text: 'B',
+			userContext: [],
+		})
+		const middle = processor.enqueueUserSubmission('session', {
+			text: 'C',
+			userContext: [],
+		})
+		processor.enqueueUserSubmission('session', {
+			text: 'D',
+			userContext: [],
+		})
+		expect(middle).toBeTruthy()
+		expect(processor.cancelQueuedSubmission('session', middle!)).toBe(true)
+		expect(processor.cancelQueuedSubmission('session', middle!)).toBe(false)
+
+		await processor.stopActiveTurn('session')
+		await runtime.processing
+
+		expect(runTurn).toHaveBeenCalledTimes(2)
+		expect(runtime.scheduler.queued).toEqual([])
+		const lastMessage = master.timeline.at(-1)
+		expect(lastMessage?.parts[0]).toMatchObject({ text: 'B\n\nD' })
+	})
+
 	it('cancels T1 without replaying it and drains queued T2', async () => {
 		let callCount = 0
 		const runTurn = vi.fn(({ abortSignal }: { abortSignal?: AbortSignal }) => {
@@ -226,9 +277,8 @@ describe('SessionProcessor master turn worker', () => {
 
 	it('claims queued work without a fallible pre-claim persistence step', async () => {
 		const runTurn = vi.fn(async () => ({ status: 'completed', text: TEXT_TWO }))
-		const { processor, runtime, messageFactory, store, reportTransientError } =
+		const { processor, runtime, store, reportTransientError } =
 			createHarness(runTurn)
-		messageFactory.removeIncompleteToolCalls.mockReturnValue(true)
 		store.persistSession.mockRejectedValueOnce(
 			new Error('neutral persistence failure'),
 		)
@@ -357,6 +407,50 @@ describe('SessionProcessor master turn worker', () => {
 		)
 	})
 
+	it('finalizes incomplete tool calls when the turn fails', async () => {
+		const runTurn = vi.fn(async () => {
+			throw new Error('neutral model failure')
+		})
+		const { master, processor, runtime, messageFactory } =
+			createHarness(runTurn)
+		master.timeline.push({
+			id: 'tool-message',
+			role: 'assistant',
+			metadata: { createdAt: 2 },
+			parts: [
+				{
+					type: 'dynamic-tool',
+					toolName: 'bash',
+					toolCallId: 'call-unknown',
+					state: 'input-available',
+					input: { command: 'sleep 30' },
+				},
+			],
+		})
+		master.toolTimings['call-unknown'] = { startedAt: 1 }
+		messageFactory.failIncompleteToolCalls.mockImplementation(
+			(agent: unknown) => finalizeAbortedToolCalls(agent as never, 'unknown'),
+		)
+
+		processor.enqueueUserSubmission('session', {
+			text: TEXT_ONE,
+			userContext: [],
+		})
+		await runtime.processing
+
+		expect(messageFactory.failIncompleteToolCalls).toHaveBeenCalledWith(master)
+		const part = master.timeline.find(
+			(message) => message.id === 'tool-message',
+		)?.parts[0]
+		expect(part).toMatchObject({
+			state: 'output-error',
+			errorText: expect.stringContaining('TOOL_OUTCOME_UNKNOWN'),
+		})
+		expect(master.toolTimings['call-unknown']).toMatchObject({
+			outcome: 'unknown',
+		})
+	})
+
 	it('restores the exact transcript when regeneration fails', async () => {
 		const request = {
 			id: 'request',
@@ -480,9 +574,7 @@ describe('SessionProcessor master turn worker', () => {
 		await runtime.processing
 
 		expect(master.timeline).toEqual([prefix, partial, suffix])
-		expect(messageFactory.removeIncompleteToolCalls).toHaveBeenCalledWith(
-			master,
-		)
+		expect(messageFactory.abortIncompleteToolCalls).toHaveBeenCalledWith(master)
 	})
 
 	it('commits a completed regeneration once when Stop arrives during persistence', async () => {

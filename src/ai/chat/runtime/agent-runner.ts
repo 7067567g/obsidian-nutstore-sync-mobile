@@ -18,10 +18,10 @@ import {
 	uiMessagesToModelMessages,
 } from '~/ai/chat/messages/ui-message'
 import { buildAgentSystemPrompt } from '~/ai/chat/prompts'
-import { AgentEventProjector } from '~/ai/chat/runtime/agent-event-projector'
-import type { SessionRuntimeState } from '~/ai/chat/runtime/chat-state'
-import { resolveSummaryContext } from '~/ai/chat/runtime/context-compression'
-import type { ToolExecutor } from '~/ai/chat/runtime/tool-executor'
+import { AgentEventProjector } from './agent-event-projector'
+import type { SessionRuntimeState } from './chat-state'
+import { resolveSummaryContext } from './context-compression'
+import type { ToolExecutor } from './tool-executor'
 import type { SessionStore } from '~/ai/chat/session/session-store'
 import type { ChatAgentState, ChatMessageMeta } from '~/ai/chat/types'
 import {
@@ -34,7 +34,7 @@ import {
 	updateToolCallRepeatState,
 	type ToolCallRepeatState,
 } from '~/ai/core/tool-call-repeat'
-import type { TaskOrigin } from '~/ai/chat/runtime/master-turn-scheduler'
+import type { TaskOrigin } from './master-turn-scheduler'
 import type {
 	AIModelConfig,
 	AIProviderConfig,
@@ -46,8 +46,8 @@ import {
 	InMemoryViewImageAttachmentRegistry,
 } from '~/ai/tools/view-image-attachments'
 import { createAbortError } from '~/ai/transport/abort'
-import { createCheckpointedTools } from '~/ai/chat/runtime/tool-checkpoint'
-import { ToolOutputRetention } from '~/ai/chat/runtime/tool-output-retention'
+import { createCheckpointedTools } from './tool-checkpoint'
+import { ToolOutputRetention } from './tool-output-retention'
 import i18n from '~/i18n'
 
 export type AgentTurnResult =
@@ -128,7 +128,9 @@ export class AgentRunner {
 			retention: this.retention,
 		})
 
-		const { model } = resolveLanguageModel(options.provider, options.model.id)
+		const { model } = resolveLanguageModel(options.provider, options.model.id, {
+			sessionId: session.id,
+		})
 		const metadata = new Map<string, AppToolMetadata>()
 		const recordMetadata: RecordMetadataFn = (toolCallId, value) =>
 			metadata.set(toolCallId, value)
@@ -190,8 +192,13 @@ export class AgentRunner {
 			},
 			bash: {
 				...fileToolsContext,
+				permissionGuard: stableContext.bashPermissionGuard,
+				session,
 				getSettingsSnapshot: stableContext.getSettingsSnapshot,
 				updateSettings: stableContext.updateSettings,
+			},
+			memory: {
+				app: stableContext.app,
 			},
 			apply_patch: {
 				...fileToolsContext,
@@ -241,6 +248,15 @@ export class AgentRunner {
 			)
 			return repeatState.isRepeatedTooManyTimes
 		}
+		let totalToolCalls = 0
+		const maxToolCalls = definition.maxToolCallsPerTurn
+		const toolBudgetReached: StopCondition<typeof tools> = ({ steps }) => {
+			totalToolCalls = steps.reduce(
+				(total, step) => total + (step.toolCalls?.length ?? 0),
+				0,
+			)
+			return maxToolCalls !== undefined && totalToolCalls > maxToolCalls
+		}
 		const suspendAtStepBoundary: StopCondition<typeof tools> = async ({
 			steps,
 		}) => {
@@ -256,11 +272,17 @@ export class AgentRunner {
 			instructions: systemPrompt,
 			tools,
 			toolsContext,
-			stopWhen: [isLoopFinished(), repeatedToolCalls, suspendAtStepBoundary],
+			stopWhen: [
+				isLoopFinished(),
+				repeatedToolCalls,
+				suspendAtStepBoundary,
+				toolBudgetReached,
+			],
 			maxOutputTokens: resolveModelOutputLimit(options.model),
 			prepareStep: async ({ messages, steps }) => {
-				// Request/step barrier: a failed flush aborts before the next model call.
-				await this.store.flushSession(session.id)
+				// Request/step barrier: persist the full logged prefix; a failed
+				// persist aborts before the next model call.
+				await this.store.persistSession(session, options.isTurnAlive)
 				readTracker.resetSnapshot()
 				await projector.project({ type: 'step-start' })
 				const attachments = viewImageAttachments.takeUninjected(
@@ -274,8 +296,9 @@ export class AgentRunner {
 			},
 		})
 		// Request barrier: persist the complete logged request prefix before the
-		// model adapter is dispatched.
-		await this.store.flushSession(session.id)
+		// model adapter is dispatched. `flushSession` alone would only drain an
+		// already-scheduled batch, not force this prefix to disk.
+		await this.store.persistSession(session, options.isTurnAlive)
 		const result = await toolLoop.stream({
 			messages: prepareMessagesForModel(
 				options.provider,
@@ -353,6 +376,11 @@ export class AgentRunner {
 				status: 'needs-compaction',
 				continuation: repeatState,
 			}
+		}
+		if (maxToolCalls !== undefined && totalToolCalls > maxToolCalls) {
+			throw new Error(
+				`AGENT_TOOL_BUDGET_EXCEEDED: subagent exceeded ${maxToolCalls} tool calls in one turn`,
+			)
 		}
 		if (repeatState.isRepeatedTooManyTimes) {
 			throw new Error(

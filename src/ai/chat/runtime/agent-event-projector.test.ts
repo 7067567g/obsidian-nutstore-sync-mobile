@@ -2,9 +2,10 @@ import type { ChatSession } from '~/ai/chat/domain'
 import { MessageFactory } from '~/ai/chat/messages/message-factory'
 import { createEmptyMasterAgent } from '~/ai/chat/messages/ui-message'
 import { describe, expect, it, vi } from 'vitest'
-import { AgentEventProjector } from '~/ai/chat/runtime/agent-event-projector'
-import type { SessionRuntimeState } from '~/ai/chat/runtime/chat-state'
-import { createMasterTurnScheduler } from '~/ai/chat/runtime/master-turn-scheduler'
+import { AgentEventProjector } from './agent-event-projector'
+import type { SessionRuntimeState } from './chat-state'
+import { createMasterTurnScheduler } from './master-turn-scheduler'
+import { PermissionDeniedError } from '~/ai/chat/tool-outcome'
 
 describe('AgentEventProjector', () => {
 	it('projects a running tool immediately and records its exact duration', async () => {
@@ -62,7 +63,8 @@ describe('AgentEventProjector', () => {
 		})
 
 		const timing = agent.toolTimings['call-1']
-		expect(timing.finishedAt! - timing.startedAt).toBe(125)
+		expect(timing.startedAt).toBeDefined()
+		expect(timing.finishedAt! - timing.startedAt!).toBe(125)
 		expect(timing.outcome).toBe('completed')
 		expect(agent.timeline[0].parts[0]).toMatchObject({
 			state: 'output-available',
@@ -92,6 +94,54 @@ describe('AgentEventProjector', () => {
 			output: 'ok',
 		})
 		expect(notify).toHaveBeenCalledTimes(3)
+	})
+
+	it('records denied instead of error when a tool is stopped by the permission guard', async () => {
+		const agent = createEmptyMasterAgent(1)
+		const session: ChatSession = {
+			schemaVersion: 2,
+			id: 'session',
+			createdAt: 1,
+			updatedAt: 1,
+			subagents: { master: agent },
+		}
+		const projector = new AgentEventProjector({
+			session,
+			agent,
+			store: {
+				persistSession: vi.fn(async () => undefined),
+				flushSession: vi.fn(async () => undefined),
+			} as never,
+			messageFactory: new MessageFactory({ app: {} } as never, vi.fn()),
+			notify: vi.fn(),
+			assistantMeta: { providerId: 'provider', modelId: 'model' },
+			isTurnAlive: () => true,
+		})
+
+		await projector.project({
+			type: 'tool-execution-start',
+			toolCall: {
+				type: 'tool-call',
+				toolCallId: 'call-denied',
+				toolName: 'bash',
+				input: { script: 'printf secret' },
+			} as never,
+		})
+		await projector.project({
+			type: 'tool-execution-end',
+			toolCallId: 'call-denied',
+			durationMs: 7,
+			toolOutput: {
+				type: 'tool-error',
+				error: new PermissionDeniedError('denied-by-user'),
+			},
+		})
+
+		expect(agent.toolTimings['call-denied']?.outcome).toBe('denied')
+		expect(agent.timeline[0]?.parts[0]).toMatchObject({
+			state: 'output-error',
+			errorText: 'denied-by-user',
+		})
 	})
 
 	it('merges tool results into the assistant UI message', async () => {

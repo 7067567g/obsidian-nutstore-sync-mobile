@@ -6,10 +6,12 @@ export function createContextCompactionRevision(
 	session: ChatSession,
 	provider: AIProviderConfig,
 	model: AIModelConfig,
+	backend?: 'deterministic' | 'llm',
 ) {
 	return JSON.stringify({
 		providerId: provider.id,
 		modelId: model.id,
+		backend: backend ?? null,
 		systemPrompt: session.systemPrompt ?? null,
 		disabledMcpServers: session.disabledMcpServers ?? [],
 	})

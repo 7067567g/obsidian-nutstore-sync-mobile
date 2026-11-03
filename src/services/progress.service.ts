@@ -1,6 +1,6 @@
 import { throttle } from 'lodash-es'
 import { Notice } from 'obsidian'
-import SyncProgressModal from '../components/SyncProgressModal'
+import SyncProgressModal from '~/components/SyncProgressModal'
 import {
 	onEndSync,
 	onPreparingSync,
@@ -11,9 +11,9 @@ import {
 	onSyncProgress,
 	type SyncPreparationProgress,
 	UpdateSyncProgress,
-} from '../events'
-import i18n from '../i18n'
-import NutstorePlugin from '../index'
+} from '~/events'
+import i18n from '~/i18n'
+import NutstorePlugin from '~/index'
 import { BaseService } from './service.interface'
 
 export class ProgressService extends BaseService {

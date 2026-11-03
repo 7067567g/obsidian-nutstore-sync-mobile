@@ -6,7 +6,7 @@ import { emitSsoReceive } from '~/events/sso-receive'
 import i18n from '~/i18n'
 import logger from '~/utils/logger'
 import { BaseService } from './service.interface'
-import type NutstorePlugin from '..'
+import type NutstorePlugin from '~/index'
 
 export default class ProtocolService extends BaseService {
 	constructor(private plugin: NutstorePlugin) {

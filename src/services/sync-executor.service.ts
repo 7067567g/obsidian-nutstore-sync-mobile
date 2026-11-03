@@ -10,7 +10,7 @@ import { type SyncPolicy } from '~/settings'
 import logger from '~/utils/logger'
 import waitUntil from '~/utils/wait-until'
 import { BaseService } from './service.interface'
-import type NutstorePlugin from '..'
+import type NutstorePlugin from '~/index'
 
 export interface SyncOptions {
 	mode: SyncStartMode

@@ -243,6 +243,41 @@ describe('vault_grep budgeted scope', () => {
 		expect(() => assertSafeGrepPattern('(\\d{4})+')).not.toThrow()
 	})
 
+	it('allows optional group quantifiers', () => {
+		expect(() => assertSafeGrepPattern('^\\d+(\\.\\d+)?$')).not.toThrow()
+	})
+
+	it('allows an unbounded group bounded by a mandatory literal', () => {
+		expect(() => assertSafeGrepPattern('^(\\w+\\.)+\\w+$')).not.toThrow()
+	})
+
+	it('rejects catastrophic nested and lazy quantifier shapes', () => {
+		for (const pattern of [
+			'^(a+b+)+$',
+			'^(\\w+\\s+)+$',
+			'^(a+?)+b$',
+			'^((a+)?)+b$',
+			'^(\\w+(?:\\.\\w+)?)+$',
+			'^(a+){15}b$',
+			'^(((a+)))+b$',
+			'^((a+)){15}b$',
+			'^((a+)){2,}b$',
+			'^((a{1,3}))+b$',
+			'^((a{2,3}))+b$',
+			'^((a{2,3}))*b$',
+			'^((a{0,3}))+b$',
+			'^(((a{1,3})))+b$',
+		]) {
+			expect(() => assertSafeGrepPattern(pattern)).toThrow('REGEX_TOO_COMPLEX')
+		}
+	})
+
+	it('allows fixed-length inner repeats nested under repetition', () => {
+		expect(() => assertSafeGrepPattern('^(a{5})+b$')).not.toThrow()
+		expect(() => assertSafeGrepPattern('^((a{3}))+b$')).not.toThrow()
+		expect(() => assertSafeGrepPattern('^((a{2,2}))+b$')).not.toThrow()
+	})
+
 	it('honors abortSignal before reading a file', async () => {
 		const { app } = createGrepFixture()
 		const controller = new AbortController()

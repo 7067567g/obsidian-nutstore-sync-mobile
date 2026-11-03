@@ -2,27 +2,13 @@ import type { ChatSession } from '~/ai/chat/domain'
 import type { ReversibleToolOp } from '~/ai/chat/types'
 import type { App } from 'obsidian'
 import type { ChatState } from '~/ai/chat/runtime/chat-state'
-import {
-	getMessageText,
-	getUserContextItems,
-} from '~/ai/chat/messages/ui-message'
-import {
-	getParentVaultPaths,
-	getPathDepth,
-	isVaultFile,
-	isVaultFolder,
-	normalizeReversibleToolOpRecord,
-} from '~/ai/chat/messages/reversible-op-utils'
-import {
-	decodeReversibleFileSnapshot,
-	isSkippedFileSnapshot,
-} from '~/ai/chat/messages/reversible-content'
+import { getMessageText, getUserContextItems } from './ui-message'
 import { copyUserContextItems } from '~/ai/chat/context/user-context'
 import {
 	captureWorkspaceContexts,
 	computeChangedContexts,
 } from '~/ai/chat/context/workspace-context'
-import type { MessageFactory } from '~/ai/chat/messages/message-factory'
+import type { MessageFactory } from './message-factory'
 import {
 	isSessionExecutionPending,
 	type RuntimeStates,
@@ -31,63 +17,13 @@ import type { SessionStore } from '~/ai/chat/session/session-store'
 import type { RecallMessageResult } from '~/ai/chat/ui/types'
 import logger from '~/utils/logger'
 import type { SkillRepository } from '~/ai/skills/repository'
-import {
-	createVaultFileSystem,
-	type VaultFileSystemManager,
-} from '~/ai/tools/vault-filesystem'
+import type { VaultFileSystemManager } from '~/ai/tools/vault-filesystem'
 import type {
 	SettingsSnapshotFn,
 	SettingsUpdater,
 } from '~/ai/tools/tool-context'
-import { posix as pathPosix } from 'path-browserify'
-import { normalizeLegacyVirtualPath } from '~/ai/tools/bash/mount-points'
 import type { RegenerationTransaction } from '~/ai/chat/runtime/regeneration'
-
-export async function restoreVirtualReversibleOperations(
-	app: App,
-	operations: ReversibleToolOp[],
-	options: {
-		fileSystemManager?: VaultFileSystemManager
-		settingsIo?: {
-			getSettingsSnapshot: SettingsSnapshotFn
-			updateSettings: SettingsUpdater
-		}
-	} = {},
-) {
-	const fs = await createVaultFileSystem(app, {
-		fileSystemManager: options.fileSystemManager,
-		getSettingsSnapshot: options.settingsIo?.getSettingsSnapshot,
-		updateSettings: options.settingsIo?.updateSettings,
-	})
-	const earliest = new Map<string, ReversibleToolOp>()
-	for (const operation of operations) {
-		const normalizedPath = normalizeLegacyVirtualPath(operation.vaultPath)
-		if (!earliest.has(normalizedPath)) {
-			earliest.set(normalizedPath, operation)
-		}
-	}
-	for (const [path, operation] of [...earliest.entries()].reverse()) {
-		if (operation.operation === 'create') {
-			if (await fs.exists(path)) await fs.rm(path, { recursive: true })
-			continue
-		}
-		if (operation.before.kind === 'dir') {
-			await fs.mkdir(path, { recursive: true })
-			continue
-		}
-		if (isSkippedFileSnapshot(operation.before)) {
-			logger.warn(
-				`Recall restore skipped ${path}: snapshot content was not retained`,
-			)
-			continue
-		}
-		await fs.mkdir(pathPosix.dirname(path), { recursive: true })
-		await fs.writeFile(
-			path,
-			new Uint8Array(await decodeReversibleFileSnapshot(operation.before)),
-		)
-	}
-}
+import { restoreFilesForRecall } from './message-ops-reversible'
 
 export class MessageOps {
 	constructor(
@@ -147,9 +83,9 @@ export class MessageOps {
 
 	async recallMessage(
 		messageId: string,
-		options?: { restoreFiles?: boolean },
+		options?: { restoreFiles?: boolean; session?: ChatSession | string },
 	): Promise<RecallMessageResult | void> {
-		const session = this.getLoadedActiveSession()
+		const session = this.resolveTargetSession(options?.session)
 		if (!session) {
 			return
 		}
@@ -175,6 +111,11 @@ export class MessageOps {
 		try {
 			if (options?.restoreFiles) {
 				await this.restoreFilesForRecall(reversibleOps)
+				// K3: the await above is a switch window; never mutate a session
+				// that was unloaded/replaced while we were waiting.
+				if (!this.isWritableSession(session)) {
+					return
+				}
 			}
 			for (const removed of agent.timeline.splice(idx)) {
 				delete agent.operations[removed.id]
@@ -368,163 +309,34 @@ export class MessageOps {
 	}
 
 	async restoreFilesForRecall(operations: ReversibleToolOp[]) {
-		const normalizedOperations = operations
-			.map(normalizeReversibleToolOpRecord)
-			.filter((op): op is ReversibleToolOp => !!op)
-		if (normalizedOperations.length === 0) {
-			return
-		}
-		const virtualOperations = normalizedOperations.filter((operation) =>
-			operation.vaultPath.startsWith('/'),
-		)
-		if (virtualOperations.length > 0) {
-			await this.restoreVirtualFilesForRecall(virtualOperations)
-		}
-		const legacyOperations = normalizedOperations.filter(
-			(operation) => !operation.vaultPath.startsWith('/'),
-		)
-		if (legacyOperations.length === 0) return
-
-		const earliestByPath = new Map<string, (typeof legacyOperations)[number]>()
-		for (const operation of legacyOperations) {
-			if (!earliestByPath.has(operation.vaultPath)) {
-				earliestByPath.set(operation.vaultPath, operation)
-			}
-		}
-
-		const deletePaths = new Set<string>()
-		const restoreDirs = new Set<string>()
-		const restoreFiles = new Map<
-			string,
-			Extract<ReversibleToolOp, { operation: 'update' }>['before']
-		>()
-
-		for (const operation of earliestByPath.values()) {
-			if (operation.operation === 'create') {
-				deletePaths.add(operation.vaultPath)
-				continue
-			}
-			if (operation.operation === 'update') {
-				if (isSkippedFileSnapshot(operation.before)) {
-					logger.warn(
-						`Recall restore skipped ${operation.vaultPath}: snapshot content was not retained`,
-					)
-					continue
-				}
-				restoreFiles.set(operation.vaultPath, operation.before)
-				continue
-			}
-			if (operation.before.kind === 'dir') {
-				restoreDirs.add(operation.vaultPath)
-				continue
-			}
-			if (isSkippedFileSnapshot(operation.before)) {
-				logger.warn(
-					`Recall restore skipped ${operation.vaultPath}: snapshot content was not retained`,
-				)
-				continue
-			}
-			restoreFiles.set(operation.vaultPath, operation.before)
-		}
-
-		logger.info(
-			`Recall restore start: ${normalizedOperations.length} recorded ops, ` +
-				`${deletePaths.size} deletes, ${restoreDirs.size} directories, ${restoreFiles.size} files.`,
-		)
-
-		for (const path of [...deletePaths].sort((left, right) => {
-			const depthDelta = getPathDepth(right) - getPathDepth(left)
-			return depthDelta !== 0 ? depthDelta : left.localeCompare(right)
-		})) {
-			await this.deleteVaultPathIfExists(path)
-		}
-
-		const requiredDirs = new Set<string>(restoreDirs)
-		for (const filePath of restoreFiles.keys()) {
-			for (const parentPath of getParentVaultPaths(filePath)) {
-				requiredDirs.add(parentPath)
-			}
-		}
-
-		for (const path of [...requiredDirs].sort((left, right) => {
-			const depthDelta = getPathDepth(left) - getPathDepth(right)
-			return depthDelta !== 0 ? depthDelta : left.localeCompare(right)
-		})) {
-			await this.ensureVaultDirectory(path)
-		}
-
-		for (const filePath of [...restoreFiles.keys()].sort((left, right) => {
-			const depthDelta = getPathDepth(left) - getPathDepth(right)
-			return depthDelta !== 0 ? depthDelta : left.localeCompare(right)
-		})) {
-			const snapshot = restoreFiles.get(filePath)
-			if (snapshot) {
-				await this.writeVaultFile(filePath, snapshot)
-			}
-		}
-
-		logger.info('Recall restore completed.')
-	}
-
-	private async restoreVirtualFilesForRecall(operations: ReversibleToolOp[]) {
-		await restoreVirtualReversibleOperations(this.app, operations, {
+		await restoreFilesForRecall(this.app, operations, {
 			fileSystemManager: this.fileSystemManager,
 			settingsIo: this.settingsIo,
 		})
 	}
 
-	private async deleteVaultPathIfExists(path: string) {
-		const target = this.app.vault.getAbstractFileByPath(path)
-		if (!target) {
-			return
-		}
-		if (isVaultFolder(target) && target.children.length > 0) {
-			logger.info(`Recall restore skip non-empty dir: ${path}`)
-			return
-		}
-		logger.info(`Recall restore delete: ${path}`)
-		await this.app.fileManager.trashFile(target)
+	/**
+	 * K9: bind the operation to an explicit session captured at the synchronous
+	 * entry point. A string target is resolved against `loadedSessions`; a
+	 * `ChatSession` reference additionally gets the K3 object-identity guard.
+	 */
+	private resolveTargetSession(
+		target?: ChatSession | string,
+	): ChatSession | undefined {
+		if (target === undefined) return this.getLoadedActiveSession()
+		const sessionId = typeof target === 'string' ? target : target.id
+		if (this.state.deletedSessionIds.has(sessionId)) return undefined
+		const session = this.state.loadedSessions.get(sessionId)
+		if (!session) return undefined
+		if (typeof target !== 'string' && session !== target) return undefined
+		return session
 	}
 
-	private async ensureVaultDirectory(path: string) {
-		if (!path) {
-			return
-		}
-		const target = this.app.vault.getAbstractFileByPath(path)
-		if (target) {
-			if (isVaultFolder(target)) {
-				return
-			}
-			throw new Error(`Unable to restore ${path}: a file already exists there.`)
-		}
-		logger.info(`Recall restore mkdir: ${path}`)
-		await this.app.vault.createFolder(path)
-	}
-
-	private async writeVaultFile(
-		path: string,
-		content: Extract<ReversibleToolOp, { operation: 'update' }>['before'],
-	) {
-		if (isSkippedFileSnapshot(content)) {
-			logger.warn(
-				`Recall restore skipped ${path}: snapshot content was not retained`,
-			)
-			return
-		}
-		const data = await decodeReversibleFileSnapshot(content)
-		const existing = this.app.vault.getAbstractFileByPath(path)
-		if (existing && isVaultFolder(existing)) {
-			throw new Error(
-				`Unable to restore ${path}: a directory already exists there.`,
-			)
-		}
-		if (existing && isVaultFile(existing)) {
-			logger.info(`Recall restore write: ${path} (overwrite)`)
-			await this.app.vault.modifyBinary(existing as never, data)
-			return
-		}
-		logger.info(`Recall restore write: ${path} (create)`)
-		await this.app.vault.createBinary(path, data)
+	private isWritableSession(session: ChatSession): boolean {
+		return (
+			!this.state.deletedSessionIds.has(session.id) &&
+			this.state.loadedSessions.get(session.id) === session
+		)
 	}
 
 	private getLoadedActiveSession() {

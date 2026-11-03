@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { runAgentLoop } from '~/ai/chat/runtime/agent-loop'
+import { runAgentLoop } from './agent-loop'
 
 const NEUTRAL_TEXT = 'Hello 你好 🌿'
 

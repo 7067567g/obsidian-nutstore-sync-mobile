@@ -78,10 +78,26 @@ function createAdapter() {
 	return { vault: vault as unknown as Vault, files, folders }
 }
 
+/**
+ * D-005 test harness plumbing: these cases exercise write semantics on a
+ * deliberately unguarded filesystem, so they must declare `test-harness`.
+ * Assertions are unchanged; only the explicit declaration is added.
+ */
+function createUnguardedFs(vault: Vault) {
+	return new ObsidianVaultFs(
+		vault,
+		[],
+		undefined,
+		undefined,
+		undefined,
+		'test-harness',
+	)
+}
+
 describe('ObsidianVaultFs mv overwrite semantics', () => {
 	it('overwrites an existing destination file by copy + remove', async () => {
 		const { vault, files } = createAdapter()
-		const fs = new ObsidianVaultFs(vault, [])
+		const fs = createUnguardedFs(vault)
 		await fs.mv('/.agents/t1/x', '/.agents/t2/x')
 		expect(new TextDecoder().decode(files.get('.agents/t2/x'))).toBe('AAA')
 		expect(files.has('.agents/t1/x')).toBe(false)
@@ -89,7 +105,7 @@ describe('ObsidianVaultFs mv overwrite semantics', () => {
 
 	it('rejects overwriting a directory', async () => {
 		const { vault } = createAdapter()
-		const fs = new ObsidianVaultFs(vault, [])
+		const fs = createUnguardedFs(vault)
 		await expect(fs.mv('/.agents/t1/y', '/.agents/t2/dir')).rejects.toThrow(
 			/ENOTEMPTY|EISDIR/,
 		)
@@ -97,7 +113,7 @@ describe('ObsidianVaultFs mv overwrite semantics', () => {
 
 	it('treats an identical source and destination as a no-op', async () => {
 		const { vault, files } = createAdapter()
-		const fs = new ObsidianVaultFs(vault, [])
+		const fs = createUnguardedFs(vault)
 		await fs.mv('/.agents/t1/x', '/.agents/t1/x')
 		expect(new TextDecoder().decode(files.get('.agents/t1/x'))).toBe('AAA')
 	})
@@ -133,10 +149,74 @@ describe('ObsidianVaultFs resource budgets', () => {
 			undefined,
 			undefined,
 			createBashResourceBudget({ maxWriteBytes: 2 }),
+			'test-harness',
 		)
 		await expect(fs.writeFile('/.agents/t1/new', 'ABC')).rejects.toThrow(
 			'TOOL_RESOURCE_EXCEEDED',
 		)
 		expect(files.has('.agents/t1/new')).toBe(false)
+	})
+
+	it('rejects writes into internal session/diagnostic paths', async () => {
+		const { vault, files } = createAdapter()
+		const fs = new ObsidianVaultFs(vault, [])
+		await expect(
+			fs.writeFile('/.agents/nutstore-sync/sessions/session.jsonl', 'x'),
+		).rejects.toThrow('SENSITIVE_PATH_DENIED')
+		await expect(
+			fs.writeFile(
+				'/.agents/nutstore-sync/diagnostics/startup-state.json',
+				'x',
+			),
+		).rejects.toThrow('SENSITIVE_PATH_DENIED')
+		expect(files.has('.agents/nutstore-sync/sessions/session.jsonl')).toBe(
+			false,
+		)
+	})
+})
+
+describe('ObsidianVaultFs unguarded write guard (A04)', () => {
+	it('fails closed for a write on a bare ObsidianVaultFs(vault, [])', async () => {
+		const { vault, files } = createAdapter()
+		const fs = new ObsidianVaultFs(vault, [])
+		await expect(fs.writeFile('/note.md', 'x')).rejects.toThrow(
+			/EPERM: write '\/note\.md' requires a permission guard or an explicit unguardedWrite declaration/,
+		)
+		expect(files.has('note.md')).toBe(false)
+	})
+
+	it('fails closed for delete, copy and move on a bare filesystem', async () => {
+		const { vault } = createAdapter()
+		const fs = new ObsidianVaultFs(vault, [])
+		await expect(fs.rm('/.agents/t1/x', { recursive: true })).rejects.toThrow(
+			/EPERM: delete '\/\.agents\/t1\/x'/,
+		)
+		await expect(fs.cp('/.agents/t1/x', '/.agents/t2/x')).rejects.toThrow(
+			/EPERM: copy '\/\.agents\/t1\/x'/,
+		)
+		await expect(fs.mv('/.agents/t1/x', '/.agents/t2/x')).rejects.toThrow(
+			/EPERM: move '\/\.agents\/t1\/x'/,
+		)
+	})
+
+	it('allows a write explicitly declared as unguardedWrite test-harness', async () => {
+		const { vault, files } = createAdapter()
+		const fs = createUnguardedFs(vault)
+		await fs.writeFile('/.agents/t1/new', 'ABC')
+		expect(new TextDecoder().decode(files.get('.agents/t1/new'))).toBe('ABC')
+	})
+
+	it('invokes the injected permission guard instead of failing closed', async () => {
+		const { vault } = createAdapter()
+		const guardCalls: unknown[] = []
+		const guard = async (request: unknown) => {
+			guardCalls.push(request)
+			throw new Error('GUARD_INVOKED')
+		}
+		const fs = new ObsidianVaultFs(vault, [], guard as never)
+		await expect(fs.writeFile('/note.md', 'x')).rejects.toThrow('GUARD_INVOKED')
+		expect(guardCalls).toEqual([
+			{ type: 'fs', fs: { kind: 'write', path: '/note.md' } },
+		])
 	})
 })

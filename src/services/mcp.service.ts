@@ -19,7 +19,7 @@ import { formatMcpToolResult } from '~/ai/mcp/result-artifact'
 import { obsidianFetch } from '~/ai/transport/obsidian-fetch'
 import logger from '~/utils/logger'
 import { mkdirsVault } from '~/utils/mkdirs-vault'
-import type NutstorePlugin from '..'
+import type NutstorePlugin from '~/index'
 import { BaseService } from './service.interface'
 
 export type McpServerStatus = 'connecting' | 'connected' | 'error'

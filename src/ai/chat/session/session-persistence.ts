@@ -305,11 +305,42 @@ function decodeBlobs(value: unknown): unknown {
 }
 
 /**
+ * Whether persisting `value` requires the lossless encoding pass. Plain JSON
+ * data (the overwhelmingly common session) does not: only Blob/URL values and
+ * binary views do. Non-plain objects are routed through `encodeBlobs` as well so
+ * their previous (flattened) persisted shape does not change silently.
+ *
+ * R2b / D-008 #3: exported so the JSONL write path can use it to decide whether
+ * the *live* session may be used for delta comparison. Plain sessions serialize
+ * identically, so the live message objects can feed the S1 cache while the
+ * persisted record still comes from the isolated `encodeBlobs` copy.
+ */
+export function sessionNeedsEncoding(value: unknown): boolean {
+	if (value instanceof Blob || value instanceof URL) return true
+	if (value instanceof ArrayBuffer || value instanceof Uint8Array) return true
+	if (ArrayBuffer.isView(value)) return true
+	if (Array.isArray(value)) return value.some(sessionNeedsEncoding)
+	if (!value || typeof value !== 'object') return false
+	const prototype = Object.getPrototypeOf(value) as object | null
+	if (prototype !== Object.prototype && prototype !== null) return true
+	for (const entry of Object.values(value)) {
+		if (sessionNeedsEncoding(entry)) return true
+	}
+	return false
+}
+
+/**
  * A whole ChatSession is persisted as a plain JSON file. Nested Blob/File
  * values, ArrayBuffers and Uint8Arrays cannot survive JSON.stringify, so
  * every binary payload is base64url-encoded and restored at the session
  * boundary instead. V1 records are still accepted on decode for lossless
  * migration from IndexedDB storage.
+ *
+ * The returned snapshot is always an isolated copy: callers may mutate the live
+ * session immediately after the call (see the V2 snapshot isolation test). The
+ * write path recovers S1 cache hits by comparing with the live source object
+ * (`sessionNeedsEncoding` decides whether that is safe) instead of paying a
+ * whole-session `JSON.stringify` per persist.
  */
 export async function encodeChatSessionForStorage(
 	session: ChatSession,

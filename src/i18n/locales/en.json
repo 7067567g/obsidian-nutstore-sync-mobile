@@ -171,6 +171,19 @@
 					"modelsFailed": "Failed to fetch Nutstore AI models: {{status}}",
 					"emptyModels": "Nutstore AI did not return any available models",
 					"refreshFailed": "Failed to refresh Nutstore AI models"
+				},
+				"degradation": {
+					"message": "Nutstore AI is temporarily unavailable: {{reason}}. Local chats are unaffected; switch to another model or retry later.",
+					"reasons": {
+						"offline": "network is offline or the gateway is unreachable",
+						"timeout": "the request timed out",
+						"tlsError": "TLS/certificate validation failed",
+						"unauthorized": "authorization is missing or expired",
+						"httpError": "the service returned an error",
+						"methodNotAllowed": "the endpoint rejected this HTTP method",
+						"notConfigured": "it is not configured",
+						"unknown": "an unknown error occurred"
+					}
 				}
 			},
 			"providers": {
@@ -217,6 +230,14 @@
 					"openaiResponses": "OpenAI Responses",
 					"anthropic": "Anthropic Messages",
 					"other": "Other ({{npm}})"
+				},
+				"headers": {
+					"name": "Custom request headers",
+					"desc": "Extra HTTP headers sent with this provider's model requests (values are never logged).",
+					"headerKeyPlaceholder": "Header name",
+					"headerValuePlaceholder": "Header value",
+					"addHeader": "Add header",
+					"removeHeader": "Remove header"
 				}
 			},
 			"models": {
@@ -343,11 +364,28 @@
 			},
 			"windowedRendering": {
 				"name": "Windowed rendering for long sessions",
-				"desc": "Use browser-native content-visibility to skip layout/paint for offscreen messages. Disable to fall back to the old full render."
+				"desc": "Mount only the latest page and load earlier messages page by page, evicting the oldest pages to stay within the retained-heap budget. Disable to render the full timeline."
 			},
 			"toolTimeout": {
 				"name": "Tool timeout (seconds)",
 				"desc": "Active wall-clock budget for cooperative tools such as virtual bash. Leave blank to disable. Hidden/background time is excluded."
+			},
+			"bashAccess": {
+				"name": "Bash access",
+				"desc": "Off by default. ask keeps the existing per-operation confirmation; always lets the AI run bash scripts directly.",
+				"options": {
+					"deny": "Off (recommended)",
+					"ask": "Ask",
+					"always": "Always allow"
+				}
+			},
+			"compressionBackend": {
+				"name": "Context compression backend",
+				"desc": "deterministic extracts facts locally by default (no network/model call); llm uses the model summarizer.",
+				"options": {
+					"deterministic": "Deterministic (recommended)",
+					"llm": "LLM summary"
+				}
 			}
 		},
 		"logout": {
@@ -546,7 +584,14 @@
 					"name": "Model context/output limits"
 				}
 			}
-		}
+		},
+		"allowSession": "Allow for session",
+		"bash": {
+			"message": "AI is requesting to run the following bash command:",
+			"hint": "Approve once, for this session, or always; always is saved to settings for future sessions.",
+			"command": "Command"
+		},
+		"alwaysAllowPermanent": "Always allow"
 	},
 	"sync": {
 		"error": {
@@ -738,7 +783,8 @@
 				"deleteMessage": "Delete message",
 				"regenerateMessage": "Regenerate",
 				"recallMessage": "Recall",
-				"removeContextItem": "Remove"
+				"removeContextItem": "Remove",
+				"loadEarlier": "Load {{count}} earlier messages"
 			},
 			"tooltips": {
 				"contextUsage": "Context: {{used}}% used (window {{total}} tokens · total {{usedTokens}})"
@@ -754,7 +800,10 @@
 				"contextArea": "Context",
 				"reasoning": "Reasoning",
 				"todoList": "Todo List",
-				"systemNotification": "System Notification"
+				"systemNotification": "System Notification",
+				"removeQueuedSubmission": "Remove queued message",
+				"removeQueuedSubmissionFailed": "Removal failed: this message may have already started sending",
+				"reasoningOnlyNotice": "This turn produced only reasoning output. Expand the thinking block to read it."
 			},
 			"fileChanges": {
 				"create": "Added",
@@ -882,5 +931,8 @@
 		"labels": {
 			"currentPath": "Current Path"
 		}
+	},
+	"startup": {
+		"repeatedAbnormalStarts": "A process exit was detected. You can review your chats in Chatbox."
 	}
 }

@@ -3,6 +3,7 @@ import type { AppUIMessage } from '~/ai/chat/types'
 import {
 	estimateMessageTokens,
 	estimateTextTokens,
+	estimateTextTokensCjk,
 	estimateTimelineTokens,
 } from './token-estimator'
 
@@ -17,6 +18,15 @@ function textMessage(text: string): AppUIMessage {
 describe('token estimator', () => {
 	it('prices text by the fixed character density', () => {
 		expect(estimateTextTokens('a'.repeat(400))).toBe(100)
+	})
+
+	it('prices CJK text at about two characters per token', () => {
+		expect(estimateTextTokensCjk('中'.repeat(100))).toBe(50)
+		expect(estimateTextTokensCjk('中文hello')).toBe(3)
+	})
+
+	it('keeps surrogate pairs intact in the CJK estimator', () => {
+		expect(estimateTextTokensCjk('😀'.repeat(10))).toBe(3)
 	})
 
 	it('prices a message by its content, not its JSON envelope', () => {

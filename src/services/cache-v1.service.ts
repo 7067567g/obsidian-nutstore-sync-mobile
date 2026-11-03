@@ -21,7 +21,7 @@ import {
 } from '~/utils/sync-cache-file'
 import { isTraversalCacheCompatible } from '~/utils/traversal-cache-compat'
 import { uint8ArrayToArrayBuffer } from '~/utils/uint8array-to-arraybuffer'
-import type NutstorePlugin from '..'
+import type NutstorePlugin from '~/index'
 import { BaseService } from './service.interface'
 
 export interface ExportedStorage {

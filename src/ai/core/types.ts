@@ -98,6 +98,11 @@ export type AIProviderDefinitions = z.infer<typeof aiProviderDefinitionsSchema>
 export const aiProviderConfigSchema = z.extend(aiProviderDefinitionSchema, {
 	apiKey: z.string(),
 	allowBrowserCors: z.optional(z.boolean()),
+	/**
+	 * Extra HTTP headers merged into every model request for this provider.
+	 * Values may be credentials; never log or echo them.
+	 */
+	headers: z.optional(z.record(z.string(), z.string())),
 })
 export const aiProviderInputSchema = z.extend(
 	z.partial(aiProviderConfigSchema),

@@ -7,8 +7,12 @@ function normalizeAbsolutePrefix(path: string): string {
 }
 
 function belongsToRemoteBaseDir(path: string, remoteBaseDir: string): boolean {
+	// WS-5 / H9-F3 (K15 validator): a cache key that is not absolute cannot be
+	// proven to belong to the configured remote base dir, so fail closed.
+	// Treating it as "belongs to any base" let a relative-keyed cache bypass the
+	// scope check on the import/restore path.
 	if (!isAbsolute(path)) {
-		return true
+		return false
 	}
 
 	const normalizedPath = normalizeAbsolutePrefix(path)

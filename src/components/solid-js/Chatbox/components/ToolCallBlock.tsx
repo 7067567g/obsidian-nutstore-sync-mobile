@@ -3,7 +3,7 @@ import { Match, Show, Switch, createSignal } from 'solid-js'
 
 import type { ChatDisplayToolCallBlock } from '~/ai/chat/types'
 import type { ChatAgentView, ChatboxProps } from '~/ai/chat/ui/types'
-import { t } from '../../i18n'
+import { t } from '~/components/solid-js/i18n'
 import {
 	cancelledVisual,
 	failedVisual,
@@ -12,14 +12,14 @@ import {
 	timingDuration,
 	toolStatusVisual,
 	waitingVisual,
-} from '../tool-call-status'
+} from '~/components/solid-js/Chatbox/tool-call-status'
 import {
 	formatDuration,
 	formatToolDetailsMarkdown,
 	formatToolResult,
 	toolCallDisplayTitle,
 	toolCallPurpose,
-} from '../utils'
+} from '~/components/solid-js/Chatbox/utils'
 import { TitledCollapsibleBlock } from './CollapsibleBlock'
 import { FileChangesBlock } from './FileChangesBlock'
 import { MarkdownContent } from './MarkdownContent'

@@ -3,7 +3,7 @@ import { moment } from 'obsidian'
 import { IN_DEV } from '~/consts'
 import logger from '~/utils/logger'
 import { BaseService } from './service.interface'
-import NutstorePlugin from '..'
+import NutstorePlugin from '~/index'
 
 export interface LogEntry {
 	timestamp: string

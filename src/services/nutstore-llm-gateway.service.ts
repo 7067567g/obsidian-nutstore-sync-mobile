@@ -1,175 +1,20 @@
-import { LlmGatewayClient } from '@nutstore/sso-js'
 import { Notice } from 'obsidian'
-import { Subscription, timer } from 'rxjs'
-import {
-	createModelConfig,
-	sanitizeDefaultSelections,
-} from '~/ai/catalog/config'
-import { obsidianFetch } from '~/ai/transport/obsidian-fetch'
-import type {
-	AIModelConfig,
-	AIModelInput,
-	AIModelModality,
-	AIProviderConfig,
-} from '~/ai/core/types'
-import {
-	LLM_GATEWAY_CLIENT_ID,
-	NUTSTORE_LLM_GATEWAY_PROVIDER_ID,
-} from '~/consts'
-import { emitNutstoreLlmGatewayAuth } from '~/events/nutstore-llm-gateway-auth'
+import { timer } from 'rxjs'
+import { LLM_GATEWAY_CLIENT_ID } from '~/consts'
 import i18n from '~/i18n'
 import logger from '~/utils/logger'
-import { BaseService } from './service.interface'
-import type NutstorePlugin from '..'
+import { NutstoreLlmGatewayModels } from './nutstore-llm-gateway.models'
+import type {
+	NutstoreLlmGatewayPendingAuthorization,
+	OAuthTokenResponse,
+} from './nutstore-llm-gateway.types'
 
-const TOKEN_REFRESH_SKEW_MS = 60 * 1000
-const TOKEN_REFRESH_INTERVAL_MS = 60 * 1000
+export type {
+	NutstoreLlmGatewayAuthSettings,
+	NutstoreLlmGatewayPendingAuthorization,
+} from './nutstore-llm-gateway.types'
 
-type NutstoreLlmGatewayModelApi = 'openai-completions'
-type NutstoreLlmGatewayThinkingFormat = 'openrouter' | 'openai'
-
-interface NutstoreLlmGatewayModelCost {
-	input: number
-	output: number
-	cacheRead: number
-	cacheWrite: number
-}
-
-interface NutstoreLlmGatewayModelCompat {
-	thinkingFormat: NutstoreLlmGatewayThinkingFormat
-	supportsReasoningEffort: boolean
-}
-
-interface NutstoreLlmGatewayModel {
-	id: string
-	name: string
-	description: string
-	api: NutstoreLlmGatewayModelApi
-	reasoning: boolean
-	input: AIModelModality[]
-	cost: NutstoreLlmGatewayModelCost
-	contextWindow: number
-	maxTokens: number
-	compat: NutstoreLlmGatewayModelCompat
-}
-
-interface ModelsResponse {
-	object: 'list'
-	data: NutstoreLlmGatewayModel[]
-}
-
-export interface NutstoreLlmGatewayAuthSettings {
-	accessToken?: string
-	refreshToken?: string
-	accessTokenExpiresAt?: number
-	refreshTokenExpiresAt?: number
-	pendingAuthorization?: NutstoreLlmGatewayPendingAuthorization
-}
-
-interface OAuthTokenResponse {
-	access_token: string
-	refresh_token: string
-	expires_in?: number
-	refresh_expires_in?: number
-}
-
-export interface NutstoreLlmGatewayPendingAuthorization {
-	clientId: string
-	deviceCode: string
-	userCode: string
-	verificationUri: string
-	verificationUrl: string
-	intervalMs: number
-	expiresAt: number
-}
-
-function expiresAtFromNow(seconds: number | undefined) {
-	return Date.now() + Math.max(0, seconds || 0) * 1000
-}
-
-function isAuthError(status: number) {
-	return status === 401 || status === 403
-}
-
-function isTokenUsable(expiresAt?: number) {
-	return !!expiresAt && expiresAt - Date.now() > TOKEN_REFRESH_SKEW_MS
-}
-
-function toModelConfig(model: NutstoreLlmGatewayModel): AIModelInput {
-	return {
-		id: model.id,
-		name: model.name,
-		attachment: false,
-		reasoning: model.reasoning,
-		tool_call: true,
-		temperature: true,
-		knowledge: model.description,
-		release_date: '',
-		last_updated: '',
-		modalities: {
-			input: model.input,
-			output: ['text'],
-		},
-		open_weights: false,
-		cost: {
-			input: model.cost.input,
-			output: model.cost.output,
-			cache_read: model.cost.cacheRead,
-			cache_write: model.cost.cacheWrite,
-		},
-		limit: {
-			context: model.contextWindow,
-			output: model.maxTokens,
-		},
-		provider: {
-			shape: 'completions',
-		},
-		experimental: {
-			nutstoreLlmGateway: {
-				api: model.api,
-				compat: model.compat,
-			},
-		},
-	}
-}
-
-export default class NutstoreLlmGatewayService extends BaseService {
-	private readonly client = new LlmGatewayClient({
-		fetcher: obsidianFetch,
-	})
-	private refreshSubscription: Subscription | null = null
-	private authorizationPollingSubscription: Subscription | null = null
-
-	constructor(private plugin: NutstorePlugin) {
-		super()
-	}
-
-	isProviderId(providerId?: string) {
-		return providerId === NUTSTORE_LLM_GATEWAY_PROVIDER_ID
-	}
-
-	isManagedProvider(provider?: Pick<AIProviderConfig, 'id'>) {
-		return this.isProviderId(provider?.id)
-	}
-
-	isAuthorized() {
-		return !!this.settings.accessToken && !!this.settings.refreshToken
-	}
-
-	isAuthorizing() {
-		return !!this.settings.pendingAuthorization
-	}
-
-	getPendingAuthorization() {
-		return this.settings.pendingAuthorization
-	}
-
-	private emitAuthState() {
-		emitNutstoreLlmGatewayAuth({
-			status: this.isAuthorizing() ? 'authorizing' : 'idle',
-		})
-	}
-
+export default class NutstoreLlmGatewayService extends NutstoreLlmGatewayModels {
 	async startAuthorization() {
 		if (this.settings.pendingAuthorization) {
 			this.resumeAuthorizationPolling()
@@ -222,77 +67,6 @@ export default class NutstoreLlmGatewayService extends BaseService {
 		document.body.removeChild(anchor)
 	}
 
-	async refreshModels(options: { removeOnAuthError?: boolean } = {}) {
-		const token = await this.ensureAccessToken(options)
-		if (!token) {
-			return false
-		}
-
-		const endpoints = this.client.getLlmGatewayEndpoints()
-		const response = await obsidianFetch(endpoints.models, {
-			method: 'GET',
-			headers: { Authorization: `Bearer ${token}` },
-		})
-		if (!response.ok) {
-			if (isAuthError(response.status) && options.removeOnAuthError) {
-				this.clearProviderAndAuth()
-			}
-			throw new Error(
-				i18n.t('settings.ai.nutstoreLlmGateway.errors.modelsFailed', {
-					status: response.status,
-				}),
-			)
-		}
-
-		const payload = (await response.json()) as ModelsResponse
-		const models = Object.fromEntries(
-			payload.data
-				.map((model) => ({
-					...model,
-					id: model.id.trim(),
-					name: model.name.trim(),
-				}))
-				.filter((model) => !!model.id)
-				.map((model) => [model.id, createModelConfig(toModelConfig(model))]),
-		)
-
-		if (Object.keys(models).length === 0) {
-			throw new Error(
-				i18n.t('settings.ai.nutstoreLlmGateway.errors.emptyModels'),
-			)
-		}
-
-		this.plugin.settings.ai.providers = {
-			...this.plugin.settings.ai.providers,
-			[NUTSTORE_LLM_GATEWAY_PROVIDER_ID]: this.createProvider(token, models),
-		}
-		this.plugin.settings.ai.defaultModel = sanitizeDefaultSelections(
-			this.plugin.settings.ai.providers,
-			this.plugin.settings.ai.defaultModel,
-		)
-		return true
-	}
-
-	async ensureProviderReady(provider?: AIProviderConfig) {
-		if (!this.isProviderId(provider?.id)) {
-			return
-		}
-		const previousAccessToken = this.settings.accessToken
-		const token = await this.ensureAccessToken({ removeOnAuthError: true })
-		if (!token) {
-			throw new Error(
-				i18n.t('settings.ai.nutstoreLlmGateway.errors.authorizationRequired'),
-			)
-		}
-		this.updateProviderApiKey(token)
-		if (provider) {
-			provider.apiKey = token
-		}
-		if (token !== previousAccessToken) {
-			await this.plugin.settingsService.saveSettings()
-		}
-	}
-
 	async initializeProviderFromStoredAuth() {
 		if (this.settings.pendingAuthorization) {
 			if (this.settings.pendingAuthorization.expiresAt <= Date.now()) {
@@ -337,122 +111,6 @@ export default class NutstoreLlmGatewayService extends BaseService {
 		this.stopTokenRefreshTimer()
 	}
 
-	private async ensureAccessToken(options: { removeOnAuthError?: boolean }) {
-		if (isTokenUsable(this.settings.accessTokenExpiresAt)) {
-			return this.settings.accessToken
-		}
-		if (
-			!this.settings.refreshToken ||
-			!isTokenUsable(this.settings.refreshTokenExpiresAt)
-		) {
-			if (options.removeOnAuthError) {
-				this.clearProviderAndAuth()
-			}
-			return undefined
-		}
-
-		try {
-			const token = await this.client.refreshToken({
-				refreshToken: this.settings.refreshToken,
-			})
-			this.applyToken(token)
-			return token.access_token
-		} catch (error) {
-			if (options.removeOnAuthError) {
-				this.clearProviderAndAuth()
-			}
-			throw error
-		}
-	}
-
-	private applyToken(token: OAuthTokenResponse) {
-		this.settings.accessToken = token.access_token
-		this.settings.refreshToken = token.refresh_token
-		this.settings.accessTokenExpiresAt = expiresAtFromNow(token.expires_in)
-		this.settings.refreshTokenExpiresAt = expiresAtFromNow(
-			token.refresh_expires_in,
-		)
-	}
-
-	private createProvider(
-		accessToken: string,
-		models: Record<string, AIModelConfig>,
-	): AIProviderConfig {
-		const endpoints = this.client.getLlmGatewayEndpoints()
-		return {
-			id: NUTSTORE_LLM_GATEWAY_PROVIDER_ID,
-			env: [],
-			npm: '@ai-sdk/openai-compatible',
-			api: endpoints.openaiCompatibleBaseUrl,
-			name: i18n.t('settings.ai.nutstoreLlmGateway.providerName'),
-			doc: '',
-			apiKey: accessToken,
-			allowBrowserCors: true,
-			models,
-		}
-	}
-
-	private clearProviderAndAuth() {
-		this.settings.accessToken = undefined
-		this.settings.refreshToken = undefined
-		this.settings.accessTokenExpiresAt = undefined
-		this.settings.refreshTokenExpiresAt = undefined
-		this.settings.pendingAuthorization = undefined
-		this.disableProviderToken()
-		this.stopAuthorizationPolling()
-		this.stopTokenRefreshTimer()
-		this.emitAuthState()
-	}
-
-	private disableProviderToken() {
-		const provider =
-			this.plugin.settings.ai.providers[NUTSTORE_LLM_GATEWAY_PROVIDER_ID]
-		if (provider) {
-			provider.apiKey = ''
-		}
-	}
-
-	private startTokenRefreshTimer() {
-		if (this.refreshSubscription) {
-			return
-		}
-		this.refreshSubscription = timer(
-			TOKEN_REFRESH_INTERVAL_MS,
-			TOKEN_REFRESH_INTERVAL_MS,
-		).subscribe(() => {
-			void this.refreshAccessTokenIfNeeded()
-		})
-	}
-
-	private stopTokenRefreshTimer() {
-		if (!this.refreshSubscription) {
-			return
-		}
-		this.refreshSubscription.unsubscribe()
-		this.refreshSubscription = null
-	}
-
-	private async refreshAccessTokenIfNeeded() {
-		if (
-			!this.isAuthorized() ||
-			isTokenUsable(this.settings.accessTokenExpiresAt)
-		) {
-			return
-		}
-		try {
-			const token = await this.ensureAccessToken({ removeOnAuthError: true })
-			if (!token) {
-				await this.plugin.settingsService.saveSettings()
-				return
-			}
-			this.updateProviderApiKey(token)
-			await this.plugin.settingsService.saveSettings()
-		} catch (error) {
-			this.noticeError(error)
-			await this.plugin.settingsService.saveSettings()
-		}
-	}
-
 	private resumeAuthorizationPolling() {
 		if (this.authorizationPollingSubscription) {
 			return
@@ -478,14 +136,6 @@ export default class NutstoreLlmGatewayService extends BaseService {
 				void this.pollDeviceTokenOnce(pending, pollIntervalMs)
 			},
 		)
-	}
-
-	private stopAuthorizationPolling() {
-		if (!this.authorizationPollingSubscription) {
-			return
-		}
-		this.authorizationPollingSubscription.unsubscribe()
-		this.authorizationPollingSubscription = null
 	}
 
 	private async pollDeviceTokenOnce(
@@ -568,26 +218,5 @@ export default class NutstoreLlmGatewayService extends BaseService {
 		} catch (error) {
 			logger.error(error)
 		}
-	}
-
-	private updateProviderApiKey(apiKey: string) {
-		const provider =
-			this.plugin.settings.ai.providers[NUTSTORE_LLM_GATEWAY_PROVIDER_ID]
-		if (provider) {
-			provider.apiKey = apiKey
-		}
-	}
-
-	private noticeError(error: unknown) {
-		logger.error(error)
-		new Notice(
-			error instanceof Error ? error.message : i18n.t('settings.login.failure'),
-			10000,
-		)
-	}
-
-	private get settings() {
-		this.plugin.settings.ai.nutstoreLlmGateway ??= {}
-		return this.plugin.settings.ai.nutstoreLlmGateway
 	}
 }

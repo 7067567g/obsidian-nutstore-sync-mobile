@@ -1,19 +1,18 @@
 import { For, Match, Show, Switch } from 'solid-js'
 import type { ChatDisplayBlock } from '~/ai/chat/types'
-import { messageWindowStyle } from '~/ai/chat/ui/message-window'
 import type {
 	ChatAgentView,
 	ChatTimelineMessageItem,
 	ChatboxProps,
 } from '~/ai/chat/ui/types'
-import { t } from '../../i18n'
+import { t } from '~/components/solid-js/i18n'
 import {
 	formatSystemNotificationMarkdown,
 	formatTime,
 	formatToolDetailsMarkdown,
 	formatToolResult,
 	formatUsage,
-} from '../utils'
+} from '~/components/solid-js/Chatbox/utils'
 import { ContentBlock } from './ContentBlock'
 import { ContextArea } from './ContextArea'
 import { CopyButton } from './CopyButton'
@@ -77,6 +76,7 @@ function MessageDisplayBlock(props: {
 	onOpenSubagent?: (agentId: string) => void
 	onOpenFileChange?: ChatboxProps['onOpenFileChange']
 	onResolveResourceDataUrl?: ChatboxProps['onResolveResourceDataUrl']
+	autoOpenReasoning?: boolean
 }) {
 	const contentBlock = () =>
 		props.block.kind === 'content' ? props.block : undefined
@@ -99,7 +99,9 @@ function MessageDisplayBlock(props: {
 				)}
 			</Match>
 			<Match when={reasoningBlock()}>
-				{(block) => <ReasoningBlock part={block().part} />}
+				{(block) => (
+					<ReasoningBlock part={block().part} open={props.autoOpenReasoning} />
+				)}
 			</Match>
 			<Match when={toolBlock()}>
 				{(block) => (
@@ -131,7 +133,6 @@ export function MessageCard(props: {
 	now: number
 	renderMarkdown?: ChatboxProps['renderMarkdown']
 	streaming?: boolean
-	windowed?: boolean
 	onDeleteMessage?: ChatboxProps['onDeleteMessage']
 	onRegenerateMessage?: ChatboxProps['onRegenerateMessage']
 	onRecallMessage?: ChatboxProps['onRecallMessage']
@@ -151,6 +152,18 @@ export function MessageCard(props: {
 		props.item.displayBlocks.every(
 			(block) => block.kind === 'system-notification',
 		)
+	const isReasoningOnly = () =>
+		props.item.message.role === 'assistant' &&
+		props.item.displayBlocks.length > 0 &&
+		props.item.displayBlocks.every((block) => block.kind === 'reasoning')
+
+	const shouldAutoOpenReasoning = () =>
+		isReasoningOnly() &&
+		props.item.displayBlocks.reduce(
+			(total, block) =>
+				total + (block.kind === 'reasoning' ? block.part.text.length : 0),
+			0,
+		) <= 8000
 
 	const roleLabel = () => {
 		if (props.item.message.role === 'assistant') {
@@ -178,6 +191,7 @@ export function MessageCard(props: {
 				if (block.kind === 'tool-call') return copyTextForToolCallBlock(block)
 				if (block.kind === 'system-notification')
 					return copyTextForSystemNotificationBlock(block)
+				if (block.kind === 'reasoning') return block.part.text
 				return ''
 			})
 			.filter(Boolean)
@@ -191,7 +205,6 @@ export function MessageCard(props: {
 					? ':uno: text-[var(--text-error)]'
 					: undefined
 			}
-			style={messageWindowStyle(!!props.windowed)}
 		>
 			<Show when={props.item.showHeader && !isSystemNotification()}>
 				<div class=":uno: mb-2 flex items-center justify-between gap-3 px-1 text-xs text-[var(--text-muted)]">
@@ -206,11 +219,17 @@ export function MessageCard(props: {
 				</div>
 			</Show>
 			<div class=":uno: flex flex-col gap-2">
+				<Show when={isReasoningOnly()}>
+					<p class=":uno: text-xs text-[var(--text-muted)]">
+						{t('chatbox.ui.labels.reasoningOnlyNotice')}
+					</p>
+				</Show>
 				<For each={props.item.displayBlocks}>
 					{(block) => (
 						<MessageDisplayBlock
 							block={block}
 							now={props.now}
+							autoOpenReasoning={shouldAutoOpenReasoning()}
 							renderMarkdown={props.renderMarkdown}
 							streaming={props.streaming}
 							getSubagent={props.getSubagent}

@@ -13,27 +13,19 @@ import {
 import i18n from '~/i18n'
 import { addClassTokens, removeClassTokens } from '~/utils/class-tokens'
 import logger from '~/utils/logger'
-import type NutstorePlugin from '..'
+import type NutstorePlugin from '~/index'
 import ModelEditorModal from './ModelEditorModal'
 import ProviderCorsConfirmModal from './ProviderCorsConfirmModal'
+import { API_FORMAT_OPTIONS } from './provider-editor-modal.options'
 
-const API_FORMAT_OPTIONS = [
-	{
-		value: '@ai-sdk/openai-compatible',
-		labelKey: 'settings.ai.provider.apiFormat.openaiChatCompletions',
-	},
-	{
-		value: '@ai-sdk/openai',
-		labelKey: 'settings.ai.provider.apiFormat.openaiResponses',
-	},
-	{
-		value: '@ai-sdk/anthropic',
-		labelKey: 'settings.ai.provider.apiFormat.anthropic',
-	},
-] as const
+interface HeaderRow {
+	key: string
+	value: string
+}
 
 export default class ProviderEditorModal extends Modal {
 	private draft: AIProviderConfig
+	private headerRows: HeaderRow[]
 	private cleanupModalMount?: () => void
 
 	constructor(
@@ -45,6 +37,9 @@ export default class ProviderEditorModal extends Modal {
 	) {
 		super(plugin.app)
 		this.draft = cloneDeep(provider)
+		this.headerRows = Object.entries(this.draft.headers ?? {}).map(
+			([key, value]) => ({ key, value }),
+		)
 	}
 
 	onOpen() {
@@ -147,6 +142,59 @@ export default class ProviderEditorModal extends Modal {
 						this.draft.allowBrowserCors = true
 					}),
 			)
+
+		const headersSetting = new Setting(bodyEl)
+			.setName(i18n.t('settings.ai.provider.headers.name'))
+			.setDesc(i18n.t('settings.ai.provider.headers.desc'))
+		const headersContainer = bodyEl.createDiv({
+			cls: ':uno: provider-editor-modal__headers',
+		})
+		const renderHeaders = () => {
+			headersContainer.empty()
+			for (const row of this.headerRows) {
+				new Setting(headersContainer)
+					.addText((text) =>
+						text
+							.setPlaceholder(
+								i18n.t('settings.ai.provider.headers.headerKeyPlaceholder'),
+							)
+							.setValue(row.key)
+							.onChange((value) => {
+								row.key = value
+							}),
+					)
+					.addText((text) =>
+						text
+							.setPlaceholder(
+								i18n.t('settings.ai.provider.headers.headerValuePlaceholder'),
+							)
+							.setValue(row.value)
+							.onChange((value) => {
+								row.value = value
+							}),
+					)
+					.addButton((button) =>
+						button
+							.setIcon('trash')
+							.setTooltip(i18n.t('settings.ai.provider.headers.removeHeader'))
+							.onClick(() => {
+								this.headerRows = this.headerRows.filter(
+									(candidate) => candidate !== row,
+								)
+								renderHeaders()
+							}),
+					)
+			}
+		}
+		renderHeaders()
+		headersSetting.addButton((button) =>
+			button
+				.setButtonText(i18n.t('settings.ai.provider.headers.addHeader'))
+				.onClick(() => {
+					this.headerRows.push({ key: '', value: '' })
+					renderHeaders()
+				}),
+		)
 
 		const modelContainer = bodyEl.createDiv({
 			cls: ':uno: provider-editor-modal__models',
@@ -262,6 +310,7 @@ export default class ProviderEditorModal extends Modal {
 					.setCta()
 					.onClick(async () => {
 						try {
+							this.draft.headers = this.collectHeaders()
 							const toSave = cloneDeep(this.draft)
 							if (this.isNew) {
 								toSave.id = slugifyProviderId(toSave.name)
@@ -285,6 +334,15 @@ export default class ProviderEditorModal extends Modal {
 					.setButtonText(i18n.t('settings.filters.cancel'))
 					.onClick(() => this.close()),
 			)
+	}
+
+	private collectHeaders() {
+		const headers: Record<string, string> = {}
+		for (const row of this.headerRows) {
+			const key = row.key.trim()
+			if (key) headers[key] = row.value
+		}
+		return Object.keys(headers).length > 0 ? headers : undefined
 	}
 
 	private deleteModel(model: AIModelConfig) {

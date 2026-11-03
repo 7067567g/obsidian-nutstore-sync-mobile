@@ -1,7 +1,7 @@
 import { createClient, WebDAVClient } from 'webdav'
-import NutstorePlugin from '../index'
-import { getNutstoreDavEndpoint } from '../utils/nutstore-endpoints'
-import { createRateLimitedWebDAVClient } from '../utils/rate-limited-client'
+import NutstorePlugin from '~/index'
+import { getNutstoreDavEndpoint } from '~/utils/nutstore-endpoints'
+import { createRateLimitedWebDAVClient } from '~/utils/rate-limited-client'
 import { BaseService } from './service.interface'
 
 export class WebDAVService extends BaseService {

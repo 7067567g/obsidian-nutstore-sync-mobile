@@ -8,7 +8,14 @@ export const DIAGNOSTICS_EXPORT_DIR = `${DIAGNOSTICS_ROOT_DIR}/diagnostics`
 export const DIAGNOSTICS_LOG_FILE = 'plugin-log.txt'
 export const DIAGNOSTICS_ROTATED_LOG_FILE = 'plugin-log.1.txt'
 
-const MAX_LOG_BYTES = 256 * 1024
+/** Rotated generations kept before the oldest is discarded. */
+export const DIAGNOSTICS_LOG_GENERATIONS = 3
+/** Rotate once the active log reaches this size. */
+export const DIAGNOSTICS_MAX_LOG_BYTES = 256 * 1024
+
+function rotatedLogFileName(generation: number) {
+	return `plugin-log.${generation}.txt`
+}
 
 /**
  * A serialized writer for a rolling `.agents/nutstore-sync/logs/plugin-log.txt`.
@@ -21,8 +28,10 @@ export class DiagnosticsLogFile {
 	private readonly logFilePath = normalizePath(
 		`${DIAGNOSTICS_LOGS_DIR}/${DIAGNOSTICS_LOG_FILE}`,
 	)
-	private readonly rotatedLogFilePath = normalizePath(
-		`${DIAGNOSTICS_LOGS_DIR}/${DIAGNOSTICS_ROTATED_LOG_FILE}`,
+	private readonly rotatedLogFilePaths = Array.from(
+		{ length: DIAGNOSTICS_LOG_GENERATIONS },
+		(_, index) =>
+			normalizePath(`${DIAGNOSTICS_LOGS_DIR}/${rotatedLogFileName(index + 1)}`),
 	)
 
 	constructor(private readonly app: App) {}
@@ -75,20 +84,24 @@ export class DiagnosticsLogFile {
 
 	async readRecent(maxBytes = 128 * 1024): Promise<string> {
 		await this.queue.catch(() => undefined)
-		for (const path of [this.logFilePath, this.rotatedLogFilePath]) {
+		const paths = [
+			...this.rotatedLogFilePaths.slice().reverse(),
+			this.logFilePath,
+		]
+		const chunks: string[] = []
+		for (const path of paths) {
 			try {
 				if (!(await this.adapter.exists(path))) continue
-				const content = await this.adapter.read(path)
-				return maxBytes > 0
-					? content.slice(Math.max(0, content.length - maxBytes))
-					: content
+				chunks.push(await this.adapter.read(path))
 			} catch {
-				/* Try the rotated file next. */
+				/* Skip an unreadable generation and keep the others. */
 			}
 		}
-		return ''
+		const content = chunks.join('')
+		return maxBytes > 0
+			? content.slice(Math.max(0, content.length - maxBytes))
+			: content
 	}
-
 	async listLogFiles(): Promise<string[]> {
 		try {
 			const listed = await this.adapter.list(DIAGNOSTICS_LOGS_DIR)
@@ -122,11 +135,29 @@ export class DiagnosticsLogFile {
 	private async rotateIfNeeded(): Promise<void> {
 		try {
 			const stat = await this.adapter.stat(this.logFilePath)
-			if (!stat || stat.size < MAX_LOG_BYTES) return
-			if (await this.adapter.exists(this.rotatedLogFilePath)) {
-				await this.adapter.remove(this.rotatedLogFilePath)
+			if (!stat || stat.size < DIAGNOSTICS_MAX_LOG_BYTES) return
+			const oldest = this.rotatedLogFilePaths.at(-1)
+			if (oldest && (await this.adapter.exists(oldest))) {
+				await this.adapter.remove(oldest)
 			}
-			await this.adapter.rename(this.logFilePath, this.rotatedLogFilePath)
+			for (
+				let index = this.rotatedLogFilePaths.length - 1;
+				index > 0;
+				index -= 1
+			) {
+				const from = this.rotatedLogFilePaths[index - 1]
+				const to = this.rotatedLogFilePaths[index]
+				if (from && to && (await this.adapter.exists(from))) {
+					await this.adapter.rename(from, to)
+				}
+			}
+			const first = this.rotatedLogFilePaths[0]
+			if (first) {
+				if (await this.adapter.exists(first)) {
+					await this.adapter.remove(first)
+				}
+				await this.adapter.rename(this.logFilePath, first)
+			}
 		} catch (error) {
 			// Rotation failing should not prevent the append fallback.
 			console.warn('[diagnostics] failed to rotate log', error)

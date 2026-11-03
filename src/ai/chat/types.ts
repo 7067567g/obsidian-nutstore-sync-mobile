@@ -199,7 +199,8 @@ export type ChatAgentStatus =
 	| 'cancelled'
 
 export interface ToolTiming {
-	startedAt: number
+	/** Absent when the call was aborted before dispatch or the start was never recorded. */
+	startedAt?: number
 	finishedAt?: number
 	/**
 	 * Normal completion/error, or recovery classification (`unknown` /

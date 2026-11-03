@@ -1,5 +1,5 @@
 import type { ChatDisplayToolCallBlock } from '~/ai/chat/types'
-import { t } from '../i18n'
+import { t } from '~/components/solid-js/i18n'
 import { formatDuration } from './utils'
 
 export function timingDuration(
@@ -7,7 +7,8 @@ export function timingDuration(
 	now: number,
 ) {
 	if (!timing) return
-	return formatDuration((timing.finishedAt ?? now) - timing.startedAt)
+	const startedAt = timing.startedAt ?? timing.finishedAt ?? now
+	return formatDuration((timing.finishedAt ?? now) - startedAt)
 }
 
 export function toolStatusVisual(

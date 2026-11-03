@@ -58,22 +58,41 @@ export const getDelta = apiLimiter.wrap(
 			},
 			processEntities: false,
 		})
-		const result = parseXml.parse(response.text) as {
-			response: DeltaResponse
+		const parsed = parseXml.parse(response.text) as
+			| { response?: DeltaResponse }
+			| null
+			| undefined
+		// A payload without a `<response>` node (e.g. an error body) would
+		// otherwise throw `TypeError` when dereferencing `result.response`.
+		// Normalise it to an empty delta so callers keep their contract.
+		const result: { response: DeltaResponse } = {
+			response: parsed?.response ?? {
+				reset: false,
+				cursor: '',
+				hasMore: false,
+				delta: { entry: [] },
+			},
 		}
 
-		if (!isNil(result?.response?.cursor)) {
+		if (isNil(result.response.cursor)) {
+			result.response.cursor = ''
+		} else {
 			result.response.cursor = result.response.cursor.toString()
 		}
-		if (result.response.delta) {
-			const entry = result.response.delta.entry
-			if (!Array.isArray(entry)) {
-				result.response.delta.entry = [entry]
-			}
+		// `fast-xml-parser` yields `''` for an empty/self-closing `<delta>`
+		// element, so treat any non-object as "no delta".
+		const rawDelta = result.response.delta as unknown
+		if (isNil(rawDelta) || typeof rawDelta !== 'object') {
+			result.response.delta = { entry: [] }
 		} else {
-			result.response.delta = {
-				entry: [],
-			}
+			const entry = (rawDelta as { entry?: unknown }).entry
+			const entries = Array.isArray(entry) ? entry : isNil(entry) ? [] : [entry]
+			// A missing `<entry>` (reset-only delta) or an empty `<entry/>`
+			// element must not turn into `[undefined]`/`['']`.
+			result.response.delta.entry = entries.filter(
+				(candidate): candidate is DeltaEntry =>
+					typeof candidate === 'object' && candidate !== null,
+			)
 		}
 		for (const entry of result.response.delta.entry) {
 			entry.path = decodeHtmlEntities(entry.path)

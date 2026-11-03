@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { Bash } from 'just-bash/browser'
-import { gunzipSync, gzipSync } from '~/shims/node-zlib'
+import {
+	deflateSync,
+	gunzipSync,
+	gzipSync,
+	inflateSync,
+} from '~/shims/node-zlib'
 
 const content = 'English text 与中文内容\nSecond neutral line 第二行\n'
 
@@ -52,6 +57,37 @@ describe('browser zlib shim', () => {
 
 		expect(() => gunzipSync(compressed, { maxOutputLength: 1 })).toThrow(
 			'exceeds',
+		)
+	})
+
+	it('round-trips content through inflateSync', () => {
+		const input = new TextEncoder().encode(content)
+
+		expect(new TextDecoder().decode(inflateSync(deflateSync(input)))).toBe(
+			content,
+		)
+	})
+
+	it('enforces maxOutputLength for inflateSync without materializing the bomb', () => {
+		// A 1 MiB run of identical bytes compresses to a few hundred bytes.
+		const bomb = deflateSync(new Uint8Array(1024 * 1024).fill(65))
+
+		expect(() => inflateSync(bomb, { maxOutputLength: 1024 })).toThrow(
+			'Decompressed data exceeds the maximum size of 1024 bytes.',
+		)
+		expect(inflateSync(bomb, { maxOutputLength: 1024 * 1024 }).byteLength).toBe(
+			1024 * 1024,
+		)
+	})
+
+	it('rejects an invalid maxOutputLength for inflateSync', () => {
+		const compressed = deflateSync(new TextEncoder().encode(content))
+
+		expect(() => inflateSync(compressed, { maxOutputLength: -1 })).toThrow(
+			RangeError,
+		)
+		expect(() => inflateSync(compressed, { maxOutputLength: 1.5 })).toThrow(
+			'non-negative integer',
 		)
 	})
 })

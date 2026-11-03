@@ -57,6 +57,47 @@ describe('buildTimeline', () => {
 		expect(block.fileChanges).toEqual(master.operations.message)
 	})
 
+	it('does not leak message snapshots across sessions (VIEW-01)', () => {
+		const makeSession = (
+			id: string,
+			messageId: string,
+			text: string,
+		): ChatSession => {
+			const master = createEmptyMasterAgent(1)
+			master.timeline.push({
+				id: messageId,
+				role: 'assistant',
+				parts: [{ type: 'text', text }],
+			})
+			return {
+				schemaVersion: 2,
+				id,
+				createdAt: 1,
+				updatedAt: 1,
+				subagents: { master },
+			}
+		}
+
+		const sessionA = makeSession('session-amic', 'a-1', 'amic content')
+		const firstA = buildTimeline(sessionA)
+		expect(
+			(firstA[0]?.message.parts[0] as { text?: string } | undefined)?.text,
+		).toBe('amic content')
+
+		// A different session must never reuse A's detached part snapshots.
+		const sessionB = makeSession('session-wander', 'b-1', 'wander content')
+		const timelineB = buildTimeline(sessionB)
+		expect(
+			(timelineB[0]?.message.parts[0] as { text?: string } | undefined)?.text,
+		).toBe('wander content')
+
+		const secondA = buildTimeline(sessionA)
+		expect(
+			(secondA[0]?.message.parts[0] as { text?: string } | undefined)?.text,
+		).toBe('amic content')
+		expect(secondA[0]?.message).not.toBe(timelineB[0]?.message)
+	})
+
 	it('reuses the cached timeline until an immutable text-part update changes it', () => {
 		const master = createEmptyMasterAgent(1)
 		const message: AppUIMessage = {
@@ -252,5 +293,118 @@ describe('buildTimeline', () => {
 			type: 'text',
 			value: expect.stringContaining('Task dispatched. Task ID: explorer-one.'),
 		})
+	})
+})
+
+describe('projection cache invalidation (H5)', () => {
+	function sessionWith(master: ChatAgentState): ChatSession {
+		return {
+			schemaVersion: 2,
+			id: 'session',
+			createdAt: 1,
+			updatedAt: 1,
+			subagents: { master },
+		}
+	}
+
+	it('CT-H5-1 rebuilds when a text part is mutated in place', () => {
+		const master = createEmptyMasterAgent(1)
+		const part = { type: 'text' as const, text: 'hello' }
+		const message: AppUIMessage = { id: 'm', role: 'assistant', parts: [part] }
+		master.timeline.push(message)
+		const session = sessionWith(master)
+		const first = buildTimeline(session)
+		expect((first[0]?.message.parts[0] as { text: string }).text).toBe('hello')
+
+		part.text = 'hello world'
+
+		const second = buildTimeline(session)
+		expect(second).not.toBe(first)
+		expect((second[0]?.message.parts[0] as { text: string }).text).toBe(
+			'hello world',
+		)
+	})
+
+	it('CT-H5-2 rebuilds when message metadata is mutated in place', () => {
+		const master = createEmptyMasterAgent(1)
+		const message: AppUIMessage = {
+			id: 'm',
+			role: 'assistant',
+			metadata: { createdAt: 111, llm: { modelId: 'model-a' } },
+			parts: [{ type: 'text', text: 'hi' }],
+		}
+		master.timeline.push(message)
+		const session = sessionWith(master)
+		const first = buildTimeline(session)
+		expect(first[0]?.createdAt).toBe(111)
+
+		const metadata = message.metadata
+		if (!metadata) throw new Error('Expected metadata')
+		metadata.createdAt = 999
+		metadata.llm = { modelId: 'model-b' }
+
+		const second = buildTimeline(session)
+		expect(second).not.toBe(first)
+		expect(second[0]?.createdAt).toBe(999)
+		expect(second[0]?.message.metadata?.llm?.modelId).toBe('model-b')
+	})
+
+	it('CT-H5-3 rebuilds when message role is mutated in place', () => {
+		const master = createEmptyMasterAgent(1)
+		const message: AppUIMessage = {
+			id: 'm',
+			role: 'assistant',
+			parts: [{ type: 'text', text: 'hi' }],
+		}
+		master.timeline.push(message)
+		const session = sessionWith(master)
+		const first = buildTimeline(session)
+		expect(first[0]?.message.role).toBe('assistant')
+
+		message.role = 'user'
+
+		const second = buildTimeline(session)
+		expect(second).not.toBe(first)
+		expect(second[0]?.message.role).toBe('user')
+	})
+
+	it('CT-H5-4 rebuilds when the operations array is pushed in place', () => {
+		const master = createEmptyMasterAgent(1)
+		const message: AppUIMessage = {
+			id: 'm',
+			role: 'assistant',
+			parts: [
+				{
+					type: 'dynamic-tool',
+					toolName: 'apply_patch',
+					toolCallId: 'call',
+					state: 'output-available',
+					input: {},
+					output: {},
+				},
+			],
+		}
+		master.timeline.push(message)
+		master.operations.m = []
+		const session = sessionWith(master)
+		const first = buildTimeline(session)
+		const firstBlock = first[0]?.displayBlocks[0]
+		if (firstBlock?.kind !== 'tool-call') throw new Error('expected tool block')
+		expect(firstBlock.fileChanges).toBeUndefined()
+
+		master.operations.m.push({
+			vaultPath: 'note.md',
+			operation: 'update',
+			before: { kind: 'file', contentBase64: 'YQ==' },
+			after: { kind: 'file', contentBase64: 'Yg==' },
+			toolCallId: 'call',
+		})
+
+		const second = buildTimeline(session)
+		expect(second).not.toBe(first)
+		const secondBlock = second[0]?.displayBlocks[0]
+		if (secondBlock?.kind !== 'tool-call')
+			throw new Error('expected tool block')
+		expect(secondBlock.fileChanges).toHaveLength(1)
 	})
 })

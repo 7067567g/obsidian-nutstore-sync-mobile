@@ -6,7 +6,7 @@ import {
 	ContextCompactionCoordinator,
 	createContextCompactionRevision,
 	type ContextCompactionRequest,
-} from '~/ai/chat/runtime/context-compaction-coordinator'
+} from './context-compaction-coordinator'
 import type { AppUIMessage, ChatAgentState } from '~/ai/chat/types'
 
 const generateText = vi.hoisted(() => vi.fn())
@@ -149,6 +149,27 @@ describe('ContextCompactionCoordinator', () => {
 
 		expect(progress.afterTokens).toBeLessThan(progress.beforeTokens)
 		expect(progress.revision).toContain('neutral-revision')
+	})
+
+	it('uses the deterministic backend without provider or model calls', async () => {
+		const { agent, session } = createPressureState()
+		const { coordinator } = createHarness()
+		const ensureProviderReady = vi.fn(async () => undefined)
+		const resolveSummaryContext = vi.fn(async () => ({}))
+		const compactionRequest: ContextCompactionRequest = {
+			...request(session, agent, 'neutral-revision'),
+			backend: 'deterministic',
+			ensureProviderReady,
+			resolveSummaryContext,
+		}
+
+		coordinator.inspect(compactionRequest)
+		const progress = await coordinator.compact(compactionRequest)
+
+		expect(progress.afterTokens).toBeLessThan(progress.beforeTokens)
+		expect(ensureProviderReady).not.toHaveBeenCalled()
+		expect(resolveSummaryContext).not.toHaveBeenCalled()
+		expect(generateText).not.toHaveBeenCalled()
 	})
 
 	it('rejects a ready summary generated with a different configuration', async () => {

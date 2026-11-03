@@ -29,7 +29,9 @@ function recoverIncompleteToolCalls(agent: ChatAgentState) {
 			const timing = agent.toolTimings[part.toolCallId]
 			const now = Date.now()
 			agent.toolTimings[part.toolCallId] = {
-				startedAt: timing?.startedAt ?? now,
+				...(timing?.startedAt !== undefined
+					? { startedAt: timing.startedAt }
+					: {}),
 				finishedAt: now,
 				outcome: TOOL_OUTCOME_UNKNOWN,
 			}
@@ -67,6 +69,20 @@ function synthesizeUnknownToolTimings(agent: ChatAgentState) {
 		changed = true
 	}
 	return changed
+}
+
+/** Count incomplete tool parts before a cold read normalizes them away. */
+export function countIncompleteToolCalls(session: ChatSession) {
+	const countAgent = (agent: ChatAgentState) =>
+		agent.timeline.reduce(
+			(total, message) =>
+				total +
+				message.parts.filter((part) => isIncompleteToolPart(part)).length,
+			0,
+		)
+	let count = countAgent(session.subagents.master)
+	for (const agent of getSessionSubagents(session)) count += countAgent(agent)
+	return count
 }
 
 /** Runtime execution cannot resume from a persisted chat session. */

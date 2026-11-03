@@ -1,6 +1,6 @@
 import { App } from 'obsidian'
 import { NutstoreSettingTab } from '.'
-import NutstorePlugin from '..'
+import NutstorePlugin from '~/index'
 
 export default abstract class BaseSettings {
 	constructor(

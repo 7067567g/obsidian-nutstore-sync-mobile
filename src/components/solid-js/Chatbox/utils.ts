@@ -1,6 +1,6 @@
 import type { ChatDisplayToolCallBlock, ChatRunState } from '~/ai/chat/types'
 export { formatDuration } from '~/utils/format-duration'
-import { t } from '../i18n'
+import { t } from '~/components/solid-js/i18n'
 
 function formatTimeFallback(timestamp: number) {
 	const date = new Date(timestamp)

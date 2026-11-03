@@ -7,7 +7,7 @@ import i18n from '~/i18n'
 import { blobKV, syncRecordKV } from '~/storage/kv'
 import logger from '~/utils/logger'
 import { BaseService } from './service.interface'
-import type NutstorePlugin from '..'
+import type NutstorePlugin from '~/index'
 
 export type GcRunResult =
 	| {

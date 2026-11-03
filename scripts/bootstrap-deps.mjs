@@ -456,7 +456,11 @@ function swapNodeModules(stageNodeModules) {
 		renameSync(stageNodeModules, nodeModulesPath)
 	} catch (error) {
 		if (error?.code !== 'EXDEV') {
-			if (backupPath && !existsSync(nodeModulesPath) && existsSync(backupPath)) {
+			if (
+				backupPath &&
+				!existsSync(nodeModulesPath) &&
+				existsSync(backupPath)
+			) {
 				renameSync(backupPath, nodeModulesPath)
 			}
 			throw error

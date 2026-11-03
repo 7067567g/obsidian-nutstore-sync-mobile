@@ -1,11 +1,12 @@
 import type { ChatState } from '~/ai/chat/runtime/chat-state'
+import type { ChatSession } from '~/ai/chat/domain'
 import type { RuntimeStates } from '~/ai/chat/runtime/runtime-state'
 import {
 	copyUserContextItem,
 	formatUserContext,
 	getUserContextItemHash,
 	type UserContextItem,
-} from '~/ai/chat/context/user-context'
+} from './user-context'
 import { toImageFilePart } from '~/ai/chat/messages/message-utils'
 import { MAX_INLINE_FILE_BYTES } from '~/ai/chat/prompts'
 import type { FilePart, TextPart } from 'ai'
@@ -14,6 +15,17 @@ export interface PreparedUserContext {
 	dedupedItems: UserContextItem[]
 }
 
+/**
+ * Explicit session target for draft/user-context writes (K9).
+ *
+ * Callers that resume after an `await` must pass the session they captured at
+ * the synchronous start of the operation. A string is accepted for UI call
+ * sites that only hold `activeSessionId`; a `ChatSession` reference enables the
+ * stronger object-identity guard (K3) so an unloaded/replaced session can never
+ * receive a late write.
+ */
+export type UserContextWriteTarget = ChatSession | string
+
 export class UserContextManager {
 	constructor(
 		private state: ChatState,
@@ -21,8 +33,8 @@ export class UserContextManager {
 		private notify: () => void,
 	) {}
 
-	addUserContext(item: UserContextItem) {
-		const session = this.getLoadedActiveSession()
+	addUserContext(item: UserContextItem, target?: UserContextWriteTarget) {
+		const session = this.resolveWriteTarget(target)
 		if (!session) return
 		const runtime = this.runtimeStates.get(session.id)
 		const normalized = copyUserContextItem(item)
@@ -53,16 +65,20 @@ export class UserContextManager {
 		this.notify()
 	}
 
-	removeUserContext(index: number) {
-		const session = this.getLoadedActiveSession()
+	removeUserContext(index: number, target?: UserContextWriteTarget) {
+		const session = this.resolveWriteTarget(target)
 		if (!session) return
 		const runtime = this.runtimeStates.get(session.id)
 		runtime.draft.userContext.splice(index, 1)
 		this.notify()
 	}
 
-	resolvePendingContextItem(id: string, replacement: UserContextItem | null) {
-		const session = this.getLoadedActiveSession()
+	resolvePendingContextItem(
+		id: string,
+		replacement: UserContextItem | null,
+		target?: UserContextWriteTarget,
+	) {
+		const session = this.resolveWriteTarget(target)
 		if (!session) return
 		const runtime = this.runtimeStates.get(session.id)
 		const index = runtime.draft.userContext.findIndex(
@@ -90,8 +106,8 @@ export class UserContextManager {
 		this.notify()
 	}
 
-	updateInputDraft(text: string) {
-		const session = this.getLoadedActiveSession()
+	updateInputDraft(text: string, target?: UserContextWriteTarget) {
+		const session = this.resolveWriteTarget(target)
 		if (!session) return
 		const runtime = this.runtimeStates.get(session.id)
 		runtime.draft.text = text
@@ -202,6 +218,23 @@ export class UserContextManager {
 		return {
 			dedupedItems,
 		}
+	}
+
+	/**
+	 * Resolve the session a write must land on (K9) and reject stale targets
+	 * (K3). Without an explicit target the legacy late-bound behaviour is kept
+	 * for callers that have not been migrated yet.
+	 */
+	private resolveWriteTarget(
+		target?: UserContextWriteTarget,
+	): ChatSession | undefined {
+		if (target === undefined) return this.getLoadedActiveSession()
+		const sessionId = typeof target === 'string' ? target : target.id
+		if (this.state.deletedSessionIds.has(sessionId)) return undefined
+		const session = this.state.loadedSessions.get(sessionId)
+		if (!session) return undefined
+		if (typeof target !== 'string' && session !== target) return undefined
+		return session
 	}
 
 	private getLoadedActiveSession() {

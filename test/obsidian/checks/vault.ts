@@ -35,6 +35,9 @@ export async function preservesBashHeredocUtf8(app: App) {
 	const result = await execVaultBash(
 		app,
 		[`cat > "/${path}" << 'ENDOFFILE'`, content, 'ENDOFFILE'].join('\n'),
+		// D-005: this integration check deliberately writes without a
+		// permission guard; declare it so the unguarded write stays explicit.
+		{ unguardedWrite: 'test-harness' },
 	)
 	assert(result.exitCode === 0, 'Bash heredoc write failed')
 	const bytes = await app.vault.adapter.readBinary(path)

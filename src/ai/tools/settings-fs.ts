@@ -30,6 +30,11 @@ export interface SettingsInput {
 	getSettings: () => NutstoreSettings
 	updateSettings: (patch: NormalizedSettingsPatch) => Promise<void>
 	permissionGuard?: PermissionGuard
+	/**
+	 * Explicit reason required to write settings without a permission guard.
+	 * Omit it for guarded tool calls; unguarded settings writes fail closed.
+	 */
+	unguardedWrite?: string
 	onRead?: (virtualPath: string) => void
 }
 
@@ -135,14 +140,28 @@ export class SettingsFs implements IFileSystem {
 			this.input.getSettings(),
 			parsed.patch,
 		)
-		await this.input.permissionGuard?.({
-			type: 'settings',
-			settings: {
-				action: 'update',
-				summary: describeSettingsPatch(changes).join('\n') || '',
-				changes,
-			},
-		})
+		if (Object.keys(changes).length === 0) {
+			// A write that matches the current settings must stay a no-op: the
+			// virtual settings file is routinely rewritten whole (bash/apply_patch),
+			// and prompting for permission or persisting an empty patch would be a
+			// spurious side effect. Mirrors settings_patch's early return.
+			return
+		}
+		if (!this.input.permissionGuard && !this.input.unguardedWrite) {
+			throw new Error(
+				'EPERM: settings write requires a permission guard or an explicit unguardedWrite declaration',
+			)
+		}
+		if (this.input.permissionGuard) {
+			await this.input.permissionGuard({
+				type: 'settings',
+				settings: {
+					action: 'update',
+					summary: describeSettingsPatch(changes).join('\n') || '',
+					changes,
+				},
+			})
+		}
 		await this.input.updateSettings(changes)
 		this.lastWriteMtime = new Date()
 	}

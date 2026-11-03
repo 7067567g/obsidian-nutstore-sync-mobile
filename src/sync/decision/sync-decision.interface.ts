@@ -2,9 +2,9 @@ import { FsWalkResult } from '~/fs/fs.interface'
 import { StatModel } from '~/model/stat.model'
 import { SyncMode } from '~/settings'
 import type { SyncLogger } from '~/sync/log'
-import { ConflictStrategy } from '../tasks/conflict-resolve.task'
-import { SkippedTaskReasonOptions } from '../tasks/skipped.task'
-import { BaseTask } from '../tasks/task.interface'
+import { ConflictStrategy } from '~/sync/tasks/conflict-resolve.task'
+import { SkippedTaskReasonOptions } from '~/sync/tasks/skipped.task'
+import { BaseTask } from '~/sync/tasks/task.interface'
 
 export interface SyncDecisionSettings {
 	skipLargeFiles: { maxSize: string }

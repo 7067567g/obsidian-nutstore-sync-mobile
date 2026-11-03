@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Platform, type Vault } from 'obsidian'
 import type { WebDAVClient } from 'webdav'
-import { downloadRemoteFile } from './chunked-download'
+import {
+	downloadRemoteFile,
+	getChunkedDownloadTempPath,
+} from './chunked-download'
 
 function copyArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 	const copy = new Uint8Array(bytes.byteLength)
@@ -81,6 +84,17 @@ class MemoryAdapter {
 
 	async exists(path: string) {
 		return this.files.has(path) || this.dirs.has(path)
+	}
+
+	async stat(path: string) {
+		const content = this.files.get(path)
+		if (content === undefined) {
+			return this.dirs.has(path) ? { type: 'folder', size: 0 } : null
+		}
+		return {
+			type: 'file',
+			size: typeof content === 'string' ? content.length : content.byteLength,
+		}
 	}
 
 	async mkdir(path: string) {
@@ -232,5 +246,129 @@ describe('chunked download', () => {
 				mobileAppDownloadFileChunkSize: '64 KiB',
 			}),
 		).rejects.toThrow('Range download failed with status 416')
+	})
+})
+
+/** WebDAV stub that records requested ranges and can fail a range N times. */
+class ResumableWebdav {
+	readonly requestedStarts: number[] = []
+	private readonly failures: Map<number, number>
+
+	constructor(
+		private readonly content: Uint8Array,
+		failures: Map<number, number> = new Map(),
+	) {
+		this.failures = new Map(failures)
+	}
+
+	async getFileContents() {
+		throw new Error('whole-file download not expected')
+	}
+
+	async customRequest(
+		_remotePath: string,
+		options: { headers: Record<string, string> },
+	) {
+		const match = /bytes=(\d+)-(\d+)/.exec(options.headers.Range)
+		if (!match) throw new Error('missing range')
+		const start = Number.parseInt(match[1], 10)
+		const end = Number.parseInt(match[2], 10)
+		this.requestedStarts.push(start)
+		const remaining = this.failures.get(start) ?? 0
+		if (remaining > 0) {
+			this.failures.set(start, remaining - 1)
+			throw new Error('transient network error')
+		}
+		const chunk = this.content.slice(start, end + 1)
+		return {
+			status: 206,
+			arrayBuffer: async () => chunk.buffer.slice(0),
+			headers: {
+				get: (name: string) =>
+					name.toLowerCase() === 'content-range'
+						? `bytes ${start}-${end}/${this.content.byteLength}`
+						: null,
+			},
+		}
+	}
+}
+
+describe('chunked download retry and resume (A18)', () => {
+	it('retries a transient chunk failure with backoff', async () => {
+		Platform.isMobileApp = true
+		const content = new Uint8Array(100).map((_, index) => index)
+		const adapter = new MemoryAdapter({ withAppendBinary: true })
+		const webdav = new ResumableWebdav(content, new Map([[0, 1]]))
+
+		await downloadRemoteFile({
+			vault: makeVault(adapter),
+			webdav: webdav as unknown as WebDAVClient,
+			remotePath: '/remote/target.bin',
+			localPath,
+			remoteSize: content.byteLength,
+			mobileAppDownloadFileChunkSize: '64 KiB',
+			chunkRetryCount: 2,
+			chunkRetryBaseDelayMs: 0,
+		})
+
+		expect(webdav.requestedStarts.filter((start) => start === 0)).toHaveLength(
+			2,
+		)
+		expect(new Uint8Array(adapter.files.get(localPath) as ArrayBuffer)).toEqual(
+			content,
+		)
+		expect(adapter.files.has(getChunkedDownloadTempPath(localPath))).toBe(false)
+	})
+
+	it('keeps the partial temp file when a chunk keeps failing', async () => {
+		Platform.isMobileApp = true
+		const content = new Uint8Array(150_000).map((_, index) => index % 256)
+		const adapter = new MemoryAdapter({ withAppendBinary: true })
+		const webdav = new ResumableWebdav(content, new Map([[65_536, 99]]))
+
+		await expect(
+			downloadRemoteFile({
+				vault: makeVault(adapter),
+				webdav: webdav as unknown as WebDAVClient,
+				remotePath: '/remote/target.bin',
+				localPath,
+				remoteSize: content.byteLength,
+				mobileAppDownloadFileChunkSize: '64 KiB',
+				chunkRetryCount: 2,
+				chunkRetryBaseDelayMs: 0,
+			}),
+		).rejects.toThrow('transient network error')
+
+		const temp = getChunkedDownloadTempPath(localPath)
+		const tempContent = adapter.files.get(temp)
+		expect(tempContent).toBeInstanceOf(ArrayBuffer)
+		expect((tempContent as ArrayBuffer).byteLength).toBe(65_536)
+		expect(adapter.files.has(localPath)).toBe(false)
+	})
+
+	it('resumes from the retained temp file instead of re-downloading', async () => {
+		Platform.isMobileApp = true
+		const content = new Uint8Array(150_000).map((_, index) => index % 256)
+		const adapter = new MemoryAdapter({ withAppendBinary: true })
+		const temp = getChunkedDownloadTempPath(localPath)
+		await adapter.writeBinary(temp, copyArrayBuffer(content.slice(0, 65_536)))
+		const webdav = new ResumableWebdav(content)
+
+		await downloadRemoteFile({
+			vault: makeVault(adapter),
+			webdav: webdav as unknown as WebDAVClient,
+			remotePath: '/remote/target.bin',
+			localPath,
+			remoteSize: content.byteLength,
+			mobileAppDownloadFileChunkSize: '64 KiB',
+			chunkRetryCount: 0,
+			chunkRetryBaseDelayMs: 0,
+		})
+
+		expect(webdav.requestedStarts[0]).toBe(65_536)
+		expect(new Uint8Array(adapter.files.get(localPath) as ArrayBuffer)).toEqual(
+			content,
+		)
+		expect(adapter.files.has(temp)).toBe(false)
 	})
 })

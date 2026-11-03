@@ -19,17 +19,26 @@
 > For the official plugin, please use the original repository:
 > <https://github.com/nutstore/obsidian-nutstore-sync>
 
-| 项目 | 信息 |
-| --- | --- |
-| 原仓库 / Upstream | [nutstore/obsidian-nutstore-sync](https://github.com/nutstore/obsidian-nutstore-sync) |
-| 本仓库 / This fork | [7067567g/obsidian-nutstore-sync-mobile](https://github.com/7067567g/obsidian-nutstore-sync-mobile) |
-| 上游基线 / Upstream base | `79d35b4` |
-| 自定义改动起点 / Modifications start | `personal-20260911`（历史起点） |
-| 当前版本 / Current version | **1.5.5** |
-| 当前构建标签 / Current build tag | `v1.5.5-mobile.1` |
-| 许可证 / License | [AGPL-3.0](LICENSE)，与上游相同 / same as upstream |
+| 项目                                 | 信息                                                                                                |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| 原仓库 / Upstream                    | [nutstore/obsidian-nutstore-sync](https://github.com/nutstore/obsidian-nutstore-sync)               |
+| 本仓库 / This fork                   | [7067567g/obsidian-nutstore-sync-mobile](https://github.com/7067567g/obsidian-nutstore-sync-mobile) |
+| 上游基线 / Upstream base             | `79d35b4`                                                                                           |
+| 自定义改动起点 / Modifications start | `personal-20260911`（历史起点）                                                                     |
+| 当前版本 / Current version           | **1.5.8**                                                                                           |
+| 当前构建标签 / Current build tag     | `v1.5.8-mobile.1`                                                                                   |
+| 许可证 / License                     | [AGPL-3.0](LICENSE)，与上游相同 / same as upstream                                                  |
 
-### 这版主要改了什么（1.5.5 / mobile stability）
+### 这版主要改了什么（1.5.8 / mobile stability）
+
+- **会话持久化**：消息签名缓存 + TTL freshness / 单次 stat 校验，避免每次全量 stringify；598×16 KiB 基准 `stringify` 20.9 MB→49.9 KB/次，persist p50 43.51→9.48 ms。
+- **长会话**：真实 **90 MB / 64 段**会话打开不卡，打开后保持 92.8 MB；Android `dumpsys meminfo` TOTAL PSS ≈ **507 MB**。
+- **Bash/搜索**：abort-aware `grep/rg`，大文件/病态正则 fail-fast；单文件 8 MiB、变长上下文 512 KiB 硬闸。
+- **稳定性**：检查点屏障、torn-tail 恢复、六类 retention 默认值、orphan ops fail-closed、窗口化/视图隔离。
+- **网关/服务商**：provider 自定义请求头、OpenCode Go 自动会话头、网关/SSO/MCP 降级分类。
+- **质量门禁**：tsc / eslint / prettier / vitest（159 文件 / 1346 用例）/ shellcheck / py_compile，严格 lint 守卫。
+
+### 历史版本 1.5.5 / mobile stability
 
 - **#94 会话检查点屏障**：副作用工具 body 前落盘；工具执行中强杀恢复为 `TOOL_OUTCOME_UNKNOWN`，不自动重试副作用。
 - **#92 会话存储恢复**：torn-tail 扫描/恢复、atomic temp/backup 启动清理、activeSegment 先发布；陈旧 temp/backup 不再永久残留。
@@ -50,11 +59,13 @@
   ```
   产物位于 `release/nutstore-sync-<version>/`（含 `main.js`、`manifest.json`、`styles.css`、`SHA256SUMS.txt`）。
 - 手机安装：把 `main.js`、`manifest.json`、`styles.css` 放入 Obsidian 插件目录 `.obsidian/plugins/nutstore-sync/`。
+- `构建与安装.sh` 的 `DEVICE` 必须由环境变量提供；`VAULT` 默认是占位符，请按自己的库路径覆盖。
 - 其他修改记录见 [`MODIFICATIONS.md`](MODIFICATIONS.md)。
 
 <details>
 <summary>English summary</summary>
 
+- **1.5.8 mobile stability**: signature-cached persistence with TTL freshness, session windowing/retention, abort-aware Bash search, provider headers, and stricter gates; a 90 MB / 64-segment session opens without lag (PSS ~507 MB).
 - **#94 checkpoint barrier**: persist side-effect tool calls before the body; interrupted executions recover as `TOOL_OUTCOME_UNKNOWN` and are never auto-retried.
 - **#92 session recovery**: torn-tail scanning, atomic temp/backup cleanup, publish activeSegment before clearing the log.
 - **#91 bounded tool output**: head/tail retention and spill to `.agents/nutstore-sync/spill/`; large results stay readable via locator.
@@ -62,7 +73,7 @@
 - **#100 guard rails**: regex complexity precheck, `vault_json` 20 MiB stat-before-read, image/PDF entry limits, 64 MiB Bash write and 32-depth budgets, `vault_stat` walk deadline.
 - **#97 capability probe**: Worker/locks/TextEncoder/structuredClone capability fields in startup self-check.
 - **Tools**: native `vault_stat` / `vault_json` / `vault_hash` / `vault_batch_edit`, `view_pdf` with image fallback, settings whitelist for tool timeout.
-- **Real-device**: 72 MB-class long session smoke passed (first paint ~3 s, smooth scrolling); crash-point matrix r1–r10 and external-write conflict passed.
+- **Real-device**: 90 MB / 64-segment session opens without lag and stays 92.8 MB on disk; Android PSS ≈507 MB. Historical 1.5.5: 72 MB smoke and crash-point matrix r1–r10 passed.
 
 This is a source-only repository; build locally with the scripts above.
 
@@ -70,13 +81,13 @@ This is a source-only repository; build locally with the scripts above.
 
 ---
 
-# 上游原始 README / Upstream README
+## 上游原始 README / Upstream README
 
 > 以下内容来自原项目 README，保留其原始标题、徽章和说明，仅用于功能参考。版权与商标归原作者所有。
 >
 > The content below is the original upstream README, preserved for feature reference. Copyright and trademarks remain with the original authors.
 
-<h1 align="center">Nutstore Sync</h1>
+<h2 align="center">Nutstore Sync</h2>
 
 <p align="center">
   <a href="#zh">中文</a> ·
